@@ -1,44 +1,79 @@
-"""Enrichment result cache — implemented in Phase 2."""
+import json
 import logging
+import time
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def get(key: str, cache_dir: str) -> Optional[dict]:
-    """Retrieve a cached enrichment result for the given key.
+class EnrichmentCache:
+    """File-based JSON cache for enrichment results, keyed by module+IP.
+
+    Each entry is stored as a separate JSON file named `{module}_{ip}.json`
+    in the cache directory. Entries include a `fetched_at` Unix timestamp
+    used to enforce TTL expiry.
 
     Args:
-        key: Cache key, typically a normalised IP address string.
-        cache_dir: Directory where cache files are stored.
-
-    Returns:
-        Cached result dict if present and not expired, otherwise None.
+        cache_dir: Directory path for cache files. Created automatically.
+        ttl_seconds: Seconds before a cache entry is considered stale.
     """
-    raise NotImplementedError("Cache retrieval is implemented in Phase 2")
 
+    def __init__(self, cache_dir: str, ttl_seconds: int = 3600):
+        self.cache_dir = Path(cache_dir)
+        self.ttl_seconds = ttl_seconds
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-def set(key: str, value: dict, cache_dir: str, ttl_seconds: int = 3600) -> None:
-    """Persist an enrichment result to the cache.
+    def _cache_path(self, module: str, ip: str) -> Path:
+        """Return the filesystem path for the cache file for (module, ip).
 
-    Args:
-        key: Cache key, typically a normalised IP address string.
-        value: Enrichment result dict to cache.
-        cache_dir: Directory where cache files are stored.
-        ttl_seconds: Time-to-live for the cache entry in seconds.
-    """
-    raise NotImplementedError("Cache storage is implemented in Phase 2")
+        Args:
+            module: One of 'vt' or 'shodan'.
+            ip: The IP address string.
 
+        Returns:
+            Path object for the cache file.
+        """
+        # Sanitize IP for filesystem safety (replace : and . with _)
+        safe_ip = ip.replace(".", "_").replace(":", "_")
+        return self.cache_dir / f"{module}_{safe_ip}.json"
 
-def is_expired(key: str, cache_dir: str, ttl_seconds: int = 3600) -> bool:
-    """Check whether a cache entry has exceeded its TTL.
+    def get(self, module: str, ip: str) -> Optional[dict]:
+        """Return cached data for (module, ip) if it exists and is not expired.
 
-    Args:
-        key: Cache key to check.
-        cache_dir: Directory where cache files are stored.
-        ttl_seconds: Maximum age in seconds before an entry is considered stale.
+        Args:
+            module: One of 'vt' or 'shodan'.
+            ip: The IP address string used as the lookup key.
 
-    Returns:
-        True if the entry does not exist or has expired, False otherwise.
-    """
-    raise NotImplementedError("Cache expiry check is implemented in Phase 2")
+        Returns:
+            The cached data dict, or None on cache miss or TTL expiry.
+        """
+        path = self._cache_path(module, ip)
+        if not path.exists():
+            return None
+        try:
+            with open(path) as f:
+                entry = json.load(f)
+            fetched_at = entry.get("fetched_at", 0)
+            if time.time() - fetched_at > self.ttl_seconds:
+                logger.debug(f"Cache expired for {module}/{ip}")
+                return None
+            return entry.get("data")
+        except Exception as e:
+            logger.warning(f"Cache read error for {module}/{ip}: {e}")
+            return None
+
+    def set(self, module: str, ip: str, data: dict) -> None:
+        """Write data to the cache for (module, ip).
+
+        Args:
+            module: One of 'vt' or 'shodan'.
+            ip: The IP address string.
+            data: The result dict to cache.
+        """
+        path = self._cache_path(module, ip)
+        try:
+            with open(path, "w") as f:
+                json.dump({"fetched_at": time.time(), "data": data}, f)
+        except Exception as e:
+            logger.warning(f"Cache write error for {module}/{ip}: {e}")
