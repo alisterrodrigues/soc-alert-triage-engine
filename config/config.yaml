@@ -1,0 +1,47 @@
+pipeline:
+  log_level: INFO
+  output_dir: output/
+  db_path: output/triage.db
+  dry_run: false
+
+enrichment:
+  virustotal:
+    enabled: true
+    api_key_env: VT_API_KEY
+    rate_limit_per_min: 4
+    timeout_seconds: 10
+  shodan:
+    enabled: true
+    api_key_env: SHODAN_API_KEY
+    rate_limit_per_min: 1
+    timeout_seconds: 10
+  cache:
+    enabled: true
+    ttl_seconds: 3600
+    cache_dir: output/.cache
+
+scoring:
+  weights:
+    severity: 0.35
+    vt_malicious_ratio: 0.25
+    shodan_exposure: 0.20
+    asset_criticality: 0.10
+    recency: 0.10
+  severity_map:
+    critical: 1.0
+    high: 0.75
+    medium: 0.45
+    low: 0.20
+  confidence_thresholds:
+    high_confidence: 0.80
+    medium_confidence: 0.50
+  output_priority_labels:
+    - INVESTIGATE_NOW
+    - INVESTIGATE_SOON
+    - MONITOR
+    - LOW_PRIORITY
+
+reporting:
+  max_alerts_in_report: 200
+  include_raw_alert: true
+  highlight_top_n: 5
