@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import sys
@@ -169,6 +170,59 @@ def _enrich_alert(
     return enrichment_source
 
 
+def _export_results(results: list, alerts: list, fmt: str, output_dir: str) -> None:
+    """Export scored alert results to CSV and/or JSON files in output_dir.
+
+    Skips writing if results is empty. Creates output_dir if it does not exist.
+
+    Args:
+        results: List of TriageResult instances.
+        alerts: List of Alert instances parallel to results.
+        fmt: One of 'csv', 'json', or 'both'.
+        output_dir: Directory path to write export files into.
+    """
+    import csv as csv_mod
+    from datetime import datetime, timezone
+
+    if not results:
+        return
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    alert_map = {a.alert_id: a for a in alerts}
+    rows = []
+    for r in results:
+        a = alert_map.get(r.alert_id)
+        rows.append({
+            "alert_id": r.alert_id,
+            "alert_name": a.alert_name if a else "",
+            "source_ip": a.source_ip if a else "",
+            "severity": a.severity if a else "",
+            "category": a.category if a else "",
+            "score": r.score,
+            "priority_label": r.priority_label,
+            "confidence": r.confidence,
+            "analyst_summary": r.analyst_summary,
+            "vt_malicious_ratio": a.vt_malicious_ratio if a else None,
+            "shodan_exposure_score": a.shodan_exposure_score if a else None,
+        })
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if fmt in ("csv", "both"):
+        csv_path = out / f"triage_results_{ts}.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv_mod.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  Exported CSV: {csv_path}")
+
+    if fmt in ("json", "both"):
+        json_path = out / f"triage_results_{ts}.json"
+        json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        print(f"  Exported JSON: {json_path}")
+
+
 class _NoopCache:
     """Drop-in replacement for EnrichmentCache that always misses — used with --no-cache."""
 
@@ -225,6 +279,13 @@ def main() -> None:
         help="Disable enrichment cache; always call APIs directly",
     )
     parser.add_argument("--output-dir", metavar="DIR", default=None)
+    parser.add_argument("--report", action="store_true", help="Generate HTML report")
+    parser.add_argument(
+        "--export",
+        metavar="FORMAT",
+        choices=["csv", "json", "both"],
+        help="Export scored alerts to file",
+    )
 
     args = parser.parse_args()
 
@@ -237,6 +298,7 @@ def main() -> None:
     logger = logging.getLogger("cli.main")
 
     db_path = config.get("pipeline", {}).get("db_path", "output/triage.db")
+    output_dir = args.output_dir or config.get("pipeline", {}).get("output_dir", "output/")
 
     # Ingest
     fmt = args.format
@@ -318,6 +380,27 @@ def main() -> None:
     for i, r in enumerate(top_n, 1):
         print(f"  #{i}  [{r.priority_label:<18} {r.score:.2f}]  {r.analyst_summary[:80]}")
     print("━" * 50)
+
+    # HTML report
+    if args.report:
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        report_path = str(Path(output_dir) / f"triage_report_{ts}.html")
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        from reporting.html_report import render_report
+        rendered = render_report(
+            results=results,
+            alerts=alerts,
+            run_id=run_id,
+            config=config,
+            output_path=report_path,
+        )
+        if rendered:
+            print(f"\n  Report: {rendered}")
+
+    # Export
+    if args.export:
+        _export_results(results, alerts, args.export, output_dir)
 
 
 if __name__ == "__main__":
