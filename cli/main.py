@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 import yaml
@@ -9,6 +10,7 @@ import yaml
 from enrichment.cache import EnrichmentCache
 from ingestion.csv_ingestor import ingest_csv
 from ingestion.json_ingestor import ingest_json
+from scoring.scorer import score_alert, TriageResult
 from store.alert_db import AlertDB
 
 
@@ -116,9 +118,9 @@ def _enrich_alert(
     enrichment_source = "live"
     vt_cfg = config.get("enrichment", {}).get("virustotal", {})
     shodan_cfg = config.get("enrichment", {}).get("shodan", {})
-
-    # VirusTotal
     vt_data = None
+    shodan_data = None
+
     if vt_cfg.get("enabled", True) and vt_key:
         cached = cache.get("vt", ip)
         if cached is not None:
@@ -141,14 +143,11 @@ def _enrich_alert(
             alert.vt_country = vt_data.get("vt_country")
             alert.vt_as_owner = vt_data.get("vt_as_owner")
 
-    # Shodan
-    shodan_data = None
     if shodan_cfg.get("enabled", True) and shodan_key:
         cached = cache.get("shodan", ip)
         if cached is not None:
             shodan_data = cached
-            if enrichment_source != "cache":
-                enrichment_source = "cache"
+            enrichment_source = "cache"
             logger.debug(f"Shodan cache hit: {ip}")
         else:
             from enrichment.shodan_lookup import lookup_ip as shodan_lookup
@@ -273,25 +272,52 @@ def main() -> None:
             ttl_seconds=cache_cfg.get("ttl_seconds", 3600),
         )
 
-    # Enrich
-    enriched_count = 0
+    # Enrich — separate loop from scoring
     for alert in alerts:
-        source = _enrich_alert(alert, vt_key, shodan_key, config, cache, args.dry_run)
-        if source != "pending":
-            enriched_count += 1
+        _enrich_alert(alert, vt_key, shodan_key, config, cache, args.dry_run)
 
-    logger.info(f"Enrichment complete — {enriched_count}/{len(alerts)} alerts processed")
+    logger.info(f"Enrichment complete — {len(alerts)}/{len(alerts)} alerts processed")
+
+    # Score — separate loop from enrichment
+    scoring_cfg = config.get("scoring", {})
+    weights = scoring_cfg.get("weights", {})
+    severity_map = scoring_cfg.get("severity_map", {})
+    confidence_thresholds = scoring_cfg.get("confidence_thresholds", {})
+
+    results: list[TriageResult] = []
+    for alert in alerts:
+        result = score_alert(alert, weights, severity_map, confidence_thresholds)
+        results.append(result)
+
+    logger.info(f"Scoring complete — {len(results)} alerts scored")
 
     # Store
     db = AlertDB(db_path)
     run_id = db.start_run()
-    for alert in alerts:
-        db.store_alert(run_id, alert)
+    for alert, result in zip(alerts, results):
+        db.store_alert(run_id, alert, triage_result=result)
     db.finish_run(run_id, len(alerts))
     db.close()
 
-    print(f"\nPhase 2 enrichment complete — {len(alerts)} alerts stored (run_id: {run_id})")
-    print(f"DB: {db_path}")
+    # Print summary
+    label_counts = Counter(r.priority_label for r in results)
+    top_n = sorted(results, key=lambda r: r.score, reverse=True)[:5]
+
+    print("\n" + "━" * 50)
+    print("  Alert Triage Engine — Run Summary")
+    print("━" * 50)
+    print(f"  Alerts ingested:    {len(alerts)}")
+    print(f"  Alerts scored:      {len(results)}")
+    print(f"  Run ID:             {run_id}")
+    print()
+    print("  Priority breakdown:")
+    for label in ["INVESTIGATE_NOW", "INVESTIGATE_SOON", "MONITOR", "LOW_PRIORITY"]:
+        print(f"    {label:<22} {label_counts.get(label, 0)}")
+    print()
+    print("  Top 5 alerts:")
+    for i, r in enumerate(top_n, 1):
+        print(f"  #{i}  [{r.priority_label:<18} {r.score:.2f}]  {r.analyst_summary[:80]}")
+    print("━" * 50)
 
 
 if __name__ == "__main__":
