@@ -17,6 +17,23 @@ PRIORITY_COLORS = {
     "LOW_PRIORITY":     ("#7f8c8d", "#f2f3f4"),
 }
 
+# MITRE ATT&CK tactic → badge color
+TACTIC_COLORS = {
+    "RECONNAISSANCE":       "#8e44ad",
+    "INITIAL_ACCESS":       "#c0392b",
+    "EXECUTION":            "#e74c3c",
+    "PERSISTENCE":          "#e67e22",
+    "PRIVILEGE_ESCALATION": "#f39c12",
+    "DEFENSE_EVASION":      "#27ae60",
+    "CREDENTIAL_ACCESS":    "#16a085",
+    "DISCOVERY":            "#2980b9",
+    "LATERAL_MOVEMENT":     "#1a5276",
+    "COLLECTION":           "#6c3483",
+    "COMMAND_AND_CONTROL":  "#922b21",
+    "EXFILTRATION":         "#7b241c",
+    "IMPACT":               "#641e16",
+}
+
 
 def render_report(
     results: list,
@@ -89,13 +106,11 @@ def _build_html(
 
     cards_html = _build_priority_cards(top_alerts, alert_map)
     table_html = _build_alert_table(results, alert_map)
-    incidents_html = _build_incidents_section(incidents or [])
+    incidents_panel_html = _build_incidents_panel(incidents or [])
+    histogram_html = _build_score_histogram(results)
     weights_json = json.dumps(weights, indent=2)
 
     config_hash = hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest()[:8]
-
-    incident_count = len(incidents) if incidents else 0
-    kill_chain_count = sum(1 for i in (incidents or []) if i.kill_chain_detected)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -132,6 +147,8 @@ def _build_html(
   .table-controls {{ padding: 16px 20px; border-bottom: 1px solid #ecf0f1; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
   .filter-btn {{ padding: 5px 12px; border: 1px solid #ddd; border-radius: 4px; background: white; cursor: pointer; font-size: 12px; transition: all 0.15s; }}
   .filter-btn.active, .filter-btn:hover {{ background: #3498db; color: white; border-color: #3498db; }}
+  .search-box {{ padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; width: 220px; }}
+  .search-box:focus {{ outline: none; border-color: #3498db; box-shadow: 0 0 0 2px rgba(52,152,219,0.15); }}
   table {{ width: 100%; border-collapse: collapse; }}
   th {{ background: #f8f9fa; text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: #7f8c8d; border-bottom: 1px solid #ecf0f1; cursor: pointer; user-select: none; white-space: nowrap; }}
   th:hover {{ background: #eef2f7; }}
@@ -142,14 +159,15 @@ def _build_html(
   tr.hidden {{ display: none; }}
   .score-cell {{ white-space: nowrap; }}
   .score-bar-wrap {{ display: flex; align-items: center; gap: 6px; }}
-  .score-bar {{ height: 6px; border-radius: 3px; background: #ecf0f1; width: 80px; overflow: hidden; }}
-  .score-fill {{ height: 100%; border-radius: 3px; }}
+  .score-bar {{ height: 8px; border-radius: 4px; background: #ecf0f1; width: 80px; overflow: hidden; }}
+  .score-fill {{ height: 100%; border-radius: 4px; }}
   .score-val {{ font-weight: 600; width: 32px; text-align: right; }}
   .badge {{ display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }}
   .badge-INVESTIGATE_NOW  {{ background: #fadbd8; color: #922b21; }}
   .badge-INVESTIGATE_SOON {{ background: #fdebd0; color: #a04000; }}
   .badge-MONITOR          {{ background: #d6eaf8; color: #1a5276; }}
   .badge-LOW_PRIORITY     {{ background: #f2f3f4; color: #566573; }}
+  .tactic-badge {{ display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; color: white; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; margin: 1px; }}
   .expand-btn {{ cursor: pointer; color: #3498db; font-size: 11px; text-decoration: underline; background: none; border: none; padding: 0; }}
   .breakdown-row {{ display: none; }}
   .breakdown-row.open {{ display: table-row; }}
@@ -163,21 +181,29 @@ def _build_html(
   .conf-high   {{ color: #27ae60; font-weight: 600; }}
   .conf-medium {{ color: #e67e22; font-weight: 600; }}
   .conf-low    {{ color: #e74c3c; font-weight: 600; }}
+  .sighting-first {{ color: #27ae60; font-weight: 600; font-size: 11px; }}
+  .sighting-low   {{ color: #e67e22; font-weight: 600; font-size: 11px; }}
+  .sighting-high  {{ color: #c0392b; font-weight: 600; font-size: 11px; }}
   .footer {{ font-size: 11px; color: #95a5a6; text-align: center; margin-top: 24px; padding: 16px; }}
   .footer code {{ background: #ecf0f1; padding: 1px 5px; border-radius: 3px; font-family: monospace; }}
-  .incident-stats {{ display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }}
-  .incident-stat {{ background: white; border-radius: 8px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); min-width: 140px; }}
-  .incident-stat .icount {{ font-size: 26px; font-weight: 700; color: #2c3e50; }}
-  .incident-stat .ilabel {{ font-size: 11px; color: #7f8c8d; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }}
-  .kill-chain-count .icount {{ color: #c0392b; }}
-  .incident-table-wrap {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; margin-bottom: 32px; }}
-  .incident-table-wrap table {{ width: 100%; border-collapse: collapse; }}
-  .incident-table-wrap th {{ background: #f8f9fa; text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: #7f8c8d; border-bottom: 1px solid #ecf0f1; }}
-  .incident-table-wrap td {{ padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 12px; vertical-align: top; }}
-  .incident-table-wrap tr:last-child td {{ border-bottom: none; }}
-  .incident-table-wrap tr:hover td {{ background: #fafbfc; }}
-  .kill-yes {{ color: #c0392b; font-weight: 600; }}
-  .kill-no  {{ color: #95a5a6; }}
+  /* Incidents panel */
+  .incidents-panel {{ margin-bottom: 28px; }}
+  .incidents-panel-stats {{ display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }}
+  .istat {{ background: white; border-radius: 8px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); min-width: 130px; }}
+  .istat-num {{ font-size: 26px; font-weight: 700; color: #2c3e50; line-height: 1; }}
+  .istat-lbl {{ font-size: 11px; color: #7f8c8d; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px; }}
+  .istat.kill {{ }}
+  .istat.kill .istat-num {{ color: #c0392b; }}
+  .incident-cards-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }}
+  .incident-card {{ border-radius: 8px; padding: 16px 18px; border-left: 4px solid; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .incident-card-score {{ font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 6px; }}
+  .incident-card-host {{ font-size: 14px; font-weight: 600; color: #2c3e50; margin-bottom: 4px; font-family: monospace; }}
+  .incident-card-span {{ font-size: 11px; color: #7f8c8d; margin-bottom: 8px; }}
+  .incident-card-tactics {{ display: flex; flex-wrap: wrap; gap: 2px; align-items: center; }}
+  .kill-chain-badge {{ display: inline-block; background: #c0392b; color: white; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 4px; }}
+  /* Histogram */
+  .score-histogram-wrap {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 18px 20px; margin-bottom: 16px; }}
+  /* Old incident table styles (kept for reference) */
   .tactic-tag {{ display: inline-block; background: #eaf4fb; color: #1a5276; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin: 1px; }}
 </style>
 </head>
@@ -193,6 +219,8 @@ def _build_html(
       <span>Config hash: {config_hash}</span>
     </div>
   </div>
+
+  {incidents_panel_html}
 
   <div class="summary">
     <div class="summary-card inv-now">
@@ -218,22 +246,11 @@ def _build_html(
     {cards_html}
   </div>
 
-  <div class="section-title">Correlated Incidents</div>
-  <div class="incident-stats">
-    <div class="incident-stat">
-      <div class="icount">{incident_count}</div>
-      <div class="ilabel">Total Incidents</div>
-    </div>
-    <div class="incident-stat kill-chain-count">
-      <div class="icount">{kill_chain_count}</div>
-      <div class="ilabel">Kill Chain Detected</div>
-    </div>
-  </div>
-  {incidents_html}
-
   <div class="section-title">All Alerts</div>
+  {histogram_html}
   <div class="table-container">
     <div class="table-controls">
+      <input type="text" id="search-box" class="search-box" placeholder="Search alerts\u2026" oninput="searchTable(this.value)">
       <span style="font-size:12px;color:#666;margin-right:4px;">Filter:</span>
       <button class="filter-btn active" onclick="filterTable(this, 'ALL')">All ({len(results)})</button>
       <button class="filter-btn" onclick="filterTable(this, 'INVESTIGATE_NOW')">Investigate Now ({label_counts.get("INVESTIGATE_NOW", 0)})</button>
@@ -254,8 +271,37 @@ def _build_html(
   function filterTable(btn, label) {{
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+    const q = (document.getElementById('search-box')?.value || '').toLowerCase();
     document.querySelectorAll('tr[data-label]').forEach(row => {{
-      if (label === 'ALL' || row.dataset.label === label) {{
+      const labelMatch = label === 'ALL' || row.dataset.label === label;
+      const searchMatch = !q || _rowMatchesSearch(row, q);
+      const show = labelMatch && searchMatch;
+      if (show) {{
+        row.classList.remove('hidden');
+        const bdr = document.getElementById('bdr-' + row.dataset.id);
+        if (bdr) bdr.classList.remove('hidden');
+      }} else {{
+        row.classList.add('hidden');
+        const bdr = document.getElementById('bdr-' + row.dataset.id);
+        if (bdr) {{ bdr.classList.add('hidden'); bdr.classList.remove('open'); }}
+      }}
+    }});
+  }}
+
+  function _rowMatchesSearch(row, q) {{
+    const text = [0, 1, 2].map(i => (row.cells[i]?.textContent || '')).join(' ').toLowerCase();
+    return text.includes(q);
+  }}
+
+  function searchTable(val) {{
+    const q = val.toLowerCase();
+    const activeBtn = document.querySelector('.filter-btn.active');
+    const activeLabel = activeBtn?.dataset?.filterLabel || 'ALL';
+    document.querySelectorAll('tr[data-label]').forEach(row => {{
+      const labelMatch = activeLabel === 'ALL' || row.dataset.label === activeLabel;
+      const searchMatch = !q || _rowMatchesSearch(row, q);
+      const show = labelMatch && searchMatch;
+      if (show) {{
         row.classList.remove('hidden');
         const bdr = document.getElementById('bdr-' + row.dataset.id);
         if (bdr) bdr.classList.remove('hidden');
@@ -340,6 +386,9 @@ def _build_priority_cards(top_results: list, alert_map: dict) -> str:
 def _build_alert_table(results: list, alert_map: dict) -> str:
     """Build the full sortable/filterable HTML table of all alerts.
 
+    Includes columns for MITRE ATT&CK tactic (colored badge) and Prior
+    Sightings (baseline indicator showing first-seen vs repeat activity).
+
     Args:
         results: All TriageResult instances.
         alert_map: Dict mapping alert_id to Alert instances.
@@ -359,6 +408,8 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
         <th onclick="sortTable(5)">Score <span class="sort-icon">\u21c5</span></th>
         <th onclick="sortTable(6)">Priority <span class="sort-icon">\u21c5</span></th>
         <th onclick="sortTable(7)">Confidence <span class="sort-icon">\u21c5</span></th>
+        <th onclick="sortTable(8)">MITRE Tactic <span class="sort-icon">\u21c5</span></th>
+        <th onclick="sortTable(9)">Prior Sightings <span class="sort-icon">\u21c5</span></th>
         <th>Breakdown</th>
       </tr>
     </thead>
@@ -384,6 +435,28 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
         score_pct = int(r.score * 100)
         conf_class = f"conf-{r.confidence}"
         safe_id = _esc(r.alert_id).replace(" ", "_").replace("&", "").replace(";", "")
+
+        # MITRE tactic cell
+        mitre_tactic = getattr(alert, "mitre_tactic", None) if alert else None
+        if mitre_tactic:
+            tactic_color = TACTIC_COLORS.get(mitre_tactic.upper(), "#7f8c8d")
+            mitre_cell = (
+                f'<span class="tactic-badge" style="background:{tactic_color};">'
+                f"{_esc(mitre_tactic)}</span>"
+            )
+        else:
+            mitre_cell = "\u2014"
+
+        # Prior sightings cell
+        sightings = getattr(r, "prior_sightings_count", None)
+        if sightings is None:
+            sightings_cell = "\u2014"
+        elif sightings == 0:
+            sightings_cell = '<span class="sighting-first">First seen</span>'
+        elif sightings <= 2:
+            sightings_cell = f'<span class="sighting-low">{sightings} prior</span>'
+        else:
+            sightings_cell = f'<span class="sighting-high">{sightings} prior \u26a0</span>'
 
         breakdown_items = []
         max_val = max(r.score_breakdown.values()) if r.score_breakdown else 1.0
@@ -413,10 +486,12 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
         </td>
         <td><span class="badge badge-{r.priority_label}">{_esc(r.priority_label.replace("_", " "))}</span></td>
         <td class="{conf_class}">{_esc(r.confidence)}</td>
+        <td>{mitre_cell}</td>
+        <td>{sightings_cell}</td>
         <td><button class="expand-btn" onclick="toggleBreakdown('{safe_id}')">details</button></td>
       </tr>
       <tr class="breakdown-row" id="bdr-{safe_id}">
-        <td colspan="9">
+        <td colspan="11">
           <div class="breakdown-inner">
             <div style="font-size:11px;color:#555;margin-bottom:8px;">{_esc(r.analyst_summary)}</div>
             <div class="breakdown-bars">{breakdown_html}</div>
@@ -425,6 +500,161 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
       </tr>""")
 
     return header + "\n".join(rows) + "\n    </tbody>\n  </table>"
+
+
+def _build_incidents_panel(incidents: list) -> str:
+    """Build the correlated incidents summary panel HTML.
+
+    Shows: incident count, kill chain count, a card per incident showing
+    host, alert count, duration, combined score, tactic chain, kill chain badge.
+
+    Only shows the top 10 incidents by combined_score.
+    If incidents is empty, returns an empty string (section is hidden).
+
+    Args:
+        incidents: List of CorrelatedIncident instances.
+
+    Returns:
+        HTML for the incidents panel, or "" if incidents is empty.
+    """
+    if not incidents:
+        return ""
+
+    top10 = sorted(incidents, key=lambda i: i.combined_score, reverse=True)[:10]
+    incident_count = len(incidents)
+    kill_chain_count = sum(1 for i in incidents if i.kill_chain_detected)
+
+    cards = []
+    for inc in top10:
+        score_color = (
+            "#c0392b" if inc.combined_score >= 0.80 else
+            "#e67e22" if inc.combined_score >= 0.55 else
+            "#2980b9" if inc.combined_score >= 0.30 else
+            "#95a5a6"
+        )
+        border_color, bg_color = PRIORITY_COLORS.get(inc.priority_label, ("#95a5a6", "#f8f9fa"))
+
+        try:
+            start_dt = datetime.fromisoformat(inc.start_time.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(inc.end_time.replace("Z", "+00:00"))
+            duration_min = int((end_dt - start_dt).total_seconds() / 60)
+        except Exception:
+            duration_min = 0
+
+        alert_word = "alert" if inc.alert_count == 1 else "alerts"
+        span_text = f"{inc.alert_count} {alert_word} over {duration_min}min"
+
+        tactic_badges = " ".join(
+            f'<span class="tactic-badge" style="background:{TACTIC_COLORS.get(t.upper(), "#7f8c8d")};">'
+            f"{_esc(t)}</span>"
+            for t in inc.tactic_chain
+        )
+        kill_badge = (
+            '<span class="kill-chain-badge">KILL CHAIN</span>'
+            if inc.kill_chain_detected
+            else ""
+        )
+
+        cards.append(f"""
+    <div class="incident-card" style="border-left-color:{border_color};background:{bg_color};">
+      <div class="incident-card-score" style="color:{score_color};">{inc.combined_score:.2f}</div>
+      <div class="incident-card-host">{_esc(inc.host)}</div>
+      <div class="incident-card-span">{span_text}</div>
+      <div class="incident-card-tactics">{tactic_badges}{kill_badge}</div>
+    </div>""")
+
+    return f"""<div class="incidents-panel">
+  <div class="section-title">Correlated Incidents</div>
+  <div class="incidents-panel-stats">
+    <div class="istat">
+      <div class="istat-num">{incident_count}</div>
+      <div class="istat-lbl">Total Incidents</div>
+    </div>
+    <div class="istat kill">
+      <div class="istat-num">{kill_chain_count}</div>
+      <div class="istat-lbl">Kill Chains Detected</div>
+    </div>
+  </div>
+  <div class="incident-cards-grid">{"".join(cards)}
+  </div>
+</div>"""
+
+
+def _build_score_histogram(results: list) -> str:
+    """Build an inline SVG score distribution histogram.
+
+    Groups alerts into 10 equal-width buckets (0.0–0.1, 0.1–0.2, … 0.9–1.0)
+    and renders vertical bars sized proportionally to the count in each bucket.
+    Bars are color-coded using the same priority thresholds as score bars.
+
+    Args:
+        results: All TriageResult instances.
+
+    Returns:
+        HTML string wrapping the SVG histogram, or "" if results is empty.
+    """
+    if not results:
+        return ""
+
+    buckets = [0] * 10
+    for r in results:
+        idx = min(int(r.score * 10), 9)
+        buckets[idx] += 1
+
+    max_count = max(buckets) if any(buckets) else 1
+
+    bar_w = 28
+    bar_gap = 6
+    margin_left = 28
+    margin_top = 8
+    max_bar_h = 44
+    label_h = 14
+    svg_w = margin_left + (bar_w + bar_gap) * 10 - bar_gap + 4
+    svg_h = margin_top + max_bar_h + label_h + 4
+
+    bars = []
+    for i, count in enumerate(buckets):
+        x = margin_left + i * (bar_w + bar_gap)
+        bar_h = int((count / max_count) * max_bar_h) if max_count > 0 else 0
+        y = margin_top + max_bar_h - bar_h
+
+        low = i * 0.1
+        bucket_color = (
+            "#c0392b" if low >= 0.80 else
+            "#e67e22" if low >= 0.55 else
+            "#2980b9" if low >= 0.30 else
+            "#bdc3c7"
+        )
+
+        bars.append(
+            f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
+            f'fill="{bucket_color}" rx="2" opacity="0.85"/>'
+        )
+        label_y = margin_top + max_bar_h + label_h
+        bars.append(
+            f'<text x="{x + bar_w // 2}" y="{label_y}" '
+            f'text-anchor="middle" font-size="8" fill="#999">{low:.1f}</text>'
+        )
+        if count > 0:
+            bars.append(
+                f'<text x="{x + bar_w // 2}" y="{y - 2}" '
+                f'text-anchor="middle" font-size="9" fill="#555">{count}</text>'
+            )
+
+    svg = (
+        f'<svg width="{svg_w}" height="{svg_h}" '
+        f'style="display:block;" aria-label="Score distribution histogram">'
+        + "".join(bars)
+        + "</svg>"
+    )
+
+    return (
+        f'<div class="score-histogram-wrap">'
+        f'<div style="font-size:12px;font-weight:600;color:#7f8c8d;margin-bottom:10px;'
+        f'text-transform:uppercase;letter-spacing:0.4px;">Score Distribution</div>'
+        f"{svg}"
+        f"</div>"
+    )
 
 
 def _build_incidents_section(incidents: list) -> str:
@@ -451,9 +681,9 @@ def _build_incidents_section(incidents: list) -> str:
             f'<span class="tactic-tag">{_esc(t)}</span>' for t in inc.tactic_chain
         ) or "<span style='color:#aaa'>—</span>"
         kill_html = (
-            '<span class="kill-yes">&#10003; Yes</span>'
+            '<span style="color:#c0392b;font-weight:600;">&#10003; Yes</span>'
             if inc.kill_chain_detected
-            else '<span class="kill-no">No</span>'
+            else '<span style="color:#95a5a6;">No</span>'
         )
         short_id = inc.incident_id[:8]
         rows.append(f"""
@@ -468,7 +698,7 @@ def _build_incidents_section(incidents: list) -> str:
         <td style="font-size:11px;color:#555;">{_esc(inc.summary)}</td>
       </tr>""")
 
-    return f"""<div class="incident-table-wrap">
+    return f"""<div style="background:white;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden;margin-bottom:32px;">
   <table>
     <thead>
       <tr>

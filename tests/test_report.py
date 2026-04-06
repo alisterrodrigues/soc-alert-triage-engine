@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from correlation.engine import CorrelatedIncident
 from ingestion import Alert
 from reporting.html_report import render_report, _esc
 from scoring.scorer import TriageResult
@@ -168,3 +169,136 @@ def test_report_with_empty_results_does_not_crash():
         out = os.path.join(tmpdir, "report.html")
         result = render_report(results=[], alerts=[], run_id="empty", config=SAMPLE_CONFIG, output_path=out)
         assert result == out
+
+
+# ── Spec F new tests ──────────────────────────────────────────────────────────
+
+def make_incident(
+    host: str = "10.0.0.1",
+    combined_score: float = 0.75,
+    alert_count: int = 3,
+    kill_chain: bool = False,
+    tactic_chain: list | None = None,
+) -> CorrelatedIncident:
+    """Return a CorrelatedIncident with realistic default values."""
+    return CorrelatedIncident(
+        incident_id="test-incident-uuid-0001",
+        host=host,
+        alert_ids=["A1", "A2", "A3"][:alert_count],
+        start_time="2026-04-05T10:00:00+00:00",
+        end_time="2026-04-05T10:23:00+00:00",
+        peak_score=combined_score,
+        combined_score=combined_score,
+        tactic_chain=tactic_chain or [],
+        kill_chain_detected=kill_chain,
+        alert_count=alert_count,
+        priority_label="INVESTIGATE_SOON",
+        summary=f"{alert_count} alerts from {host} over 23min — malware.",
+    )
+
+
+def test_render_report_with_empty_incidents_still_valid():
+    """render_report with incidents=[] must succeed and produce valid HTML."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        result = render_report(
+            results=[make_result()],
+            alerts=[make_alert()],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+            incidents=[],
+        )
+        assert result == out
+        html = Path(out).read_text(encoding="utf-8")
+        assert "<!DOCTYPE html>" in html
+
+
+def test_render_report_with_incident_contains_host_ip():
+    """render_report with one CorrelatedIncident must include the incident host in HTML."""
+    incident = make_incident(host="185.220.101.50", combined_score=0.82)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        render_report(
+            results=[make_result()],
+            alerts=[make_alert()],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+            incidents=[incident],
+        )
+        html = Path(out).read_text(encoding="utf-8")
+        assert "185.220.101.50" in html
+
+
+def test_mitre_tactic_badge_appears_when_set():
+    """When alert.mitre_tactic is set, its value must appear as a badge in the HTML."""
+    alert = make_alert()
+    alert.mitre_tactic = "LATERAL_MOVEMENT"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        render_report(
+            results=[make_result()],
+            alerts=[alert],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+        )
+        html = Path(out).read_text(encoding="utf-8")
+        assert "LATERAL_MOVEMENT" in html
+        assert "tactic-badge" in html
+
+
+def test_first_seen_text_when_prior_sightings_zero():
+    """'First seen' must appear in the HTML when prior_sightings_count == 0."""
+    result = TriageResult(
+        alert_id="TEST-001",
+        score=0.55,
+        priority_label="INVESTIGATE_SOON",
+        confidence="medium",
+        analyst_summary="Test summary.",
+        score_breakdown={"severity": 0.55},
+        prior_sightings_count=0,
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        render_report(
+            results=[result],
+            alerts=[make_alert()],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+        )
+        html = Path(out).read_text(encoding="utf-8")
+        assert "First seen" in html
+
+
+def test_search_box_present_in_html():
+    """The search box with id='search-box' must be present in the rendered HTML."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        render_report(
+            results=[make_result()],
+            alerts=[make_alert()],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+        )
+        html = Path(out).read_text(encoding="utf-8")
+        assert 'id="search-box"' in html
+
+
+def test_score_distribution_svg_present():
+    """The score distribution SVG histogram must be present in the rendered HTML."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "report.html")
+        render_report(
+            results=[make_result()],
+            alerts=[make_alert()],
+            run_id="test-run",
+            config=SAMPLE_CONFIG,
+            output_path=out,
+        )
+        html = Path(out).read_text(encoding="utf-8")
+        assert "<svg" in html
+        assert "Score Distribution" in html
