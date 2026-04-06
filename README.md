@@ -27,10 +27,10 @@ This tool answers that systematically. It pulls alerts from a file export, Splun
 ![HTML report showing incident panel with kill chain detection and priority summary cards](docs/screenshots/screenshot_report_overview.png)
 
 ### HTML report — live enrichment, ATT&CK tags, and score breakdowns
-![HTML report showing alert table with MITRE tactic column, VT enrichment data, and expanded score breakdown](docs/screenshots/screenshot_report_breakdown.png)
+![HTML report showing score distribution histogram and filtered INVESTIGATE_SOON alerts](docs/screenshots/screenshot_terminal_live.png)
 
 ### HTML report — Investigate Soon filter with score distribution
-![HTML report showing score distribution histogram and filtered INVESTIGATE_SOON alerts](docs/screenshots/screenshot_terminal_live.png)
+![HTML report showing alert table with MITRE tactic column, VT enrichment data, and expanded score breakdown](docs/screenshots/screenshot_report_breakdown.png)
 
 ---
 
