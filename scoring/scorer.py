@@ -1,5 +1,6 @@
 """Multi-factor alert priority scoring with configurable weights and analyst summaries."""
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -13,6 +14,10 @@ PRIORITY_LABELS = [
     ("LOW_PRIORITY",     0.00),
 ]
 
+# High/medium risk port sets used by _compute_shodan_exposure
+_HIGH_RISK_PORTS = {3389, 445, 5900, 1433, 9200, 27017, 6379, 4444, 8080, 2375}
+_MEDIUM_RISK_PORTS = {22, 21, 23, 25, 3306, 5432, 5984, 11211, 2181}
+
 
 @dataclass
 class TriageResult:
@@ -24,14 +29,15 @@ class TriageResult:
     confidence: str           # high | medium | low
     analyst_summary: str
     score_breakdown: dict = field(default_factory=dict)
+    enrichment_completeness: float = 1.0  # 1.0=full, 0.5=one source missing, 0.0=both missing
 
 
 def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds: dict) -> TriageResult:
     """Compute a weighted priority score for a single enriched Alert.
 
-    Each factor is normalised to [0.0, 1.0] before weighting. Factors where
-    enrichment data is unavailable (None) default to 0.0 and reduce confidence.
-    The final score is the sum of (factor_value * weight) across all factors.
+    Each factor is normalised to [0.0, 1.0] before weighting. When enrichment
+    data is unavailable (None), weights are renormalised across available factors
+    so the score represents the best estimate from available data.
     Never raises — any factor computation error is caught and logged.
 
     Args:
@@ -43,10 +49,8 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
 
     Returns:
         A TriageResult with score, priority_label, confidence, score_breakdown,
-        and a one-sentence analyst_summary.
+        enrichment_completeness, and a one-sentence analyst_summary.
     """
-    missing_enrichment = 0
-
     # ── Factor 1: Severity ──────────────────────────────────────────
     try:
         severity_score = severity_map.get(alert.severity, severity_map.get("low", 0.20))
@@ -59,24 +63,22 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         if alert.vt_malicious_ratio is not None:
             vt_score = float(alert.vt_malicious_ratio)
         else:
-            vt_score = 0.0
-            missing_enrichment += 1
+            vt_score = None
     except Exception as e:
         logger.warning(f"VT factor error for {alert.alert_id}: {e}")
-        vt_score = 0.0
-        missing_enrichment += 1
+        vt_score = None
 
-    # ── Factor 3: Shodan exposure ────────────────────────────────────
+    # ── Factor 3: Shodan exposure — weighted port/CVE model ──────────
     try:
-        if alert.shodan_exposure_score is not None:
+        if alert.shodan_open_ports or alert.shodan_vulns:
+            shodan_score = _compute_shodan_exposure(alert.shodan_open_ports, alert.shodan_vulns)
+        elif alert.shodan_exposure_score is not None:
             shodan_score = float(alert.shodan_exposure_score)
         else:
-            shodan_score = 0.0
-            missing_enrichment += 1
+            shodan_score = None
     except Exception as e:
         logger.warning(f"Shodan factor error for {alert.alert_id}: {e}")
-        shodan_score = 0.0
-        missing_enrichment += 1
+        shodan_score = None
 
     # ── Factor 4: Asset criticality ──────────────────────────────────
     try:
@@ -98,14 +100,35 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         logger.warning(f"Recency factor error for {alert.alert_id}: {e}")
         recency_score = 0.4
 
-    # ── Weighted sum ─────────────────────────────────────────────────
-    score_breakdown = {
-        "severity":           round(severity_score * weights.get("severity", 0.35), 4),
-        "vt_malicious_ratio": round(vt_score       * weights.get("vt_malicious_ratio", 0.25), 4),
-        "shodan_exposure":    round(shodan_score    * weights.get("shodan_exposure", 0.20), 4),
-        "asset_criticality":  round(asset_score     * weights.get("asset_criticality", 0.10), 4),
-        "recency":            round(recency_score   * weights.get("recency", 0.10), 4),
+    # ── Build factor values — None means unavailable ─────────────────
+    factor_values = {
+        "severity":           severity_score,
+        "vt_malicious_ratio": vt_score if alert.vt_malicious_ratio is not None else None,
+        "shodan_exposure":    shodan_score if (alert.shodan_exposure_score is not None or alert.shodan_open_ports) else None,
+        "asset_criticality":  asset_score,
+        "recency":            recency_score,
     }
+
+    # Count missing enrichment (VT and Shodan only — severity/asset/recency always available)
+    missing_enrichment = sum(1 for k in ("vt_malicious_ratio", "shodan_exposure") if factor_values[k] is None)
+
+    # Renormalize weights across available factors
+    available_weight = sum(
+        weights.get(k, 0.0) for k, v in factor_values.items() if v is not None
+    )
+    if available_weight <= 0:
+        available_weight = 1.0
+
+    score_breakdown = {}
+    for k, v in factor_values.items():
+        w = weights.get(k, 0.0)
+        if v is not None:
+            # Renormalized weight: scale up proportionally so available factors sum to 1.0
+            effective_w = w / available_weight
+            score_breakdown[k] = round(v * effective_w, 4)
+        else:
+            score_breakdown[k] = 0.0
+
     final_score = round(sum(score_breakdown.values()), 4)
 
     # ── Priority label ───────────────────────────────────────────────
@@ -113,6 +136,9 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
 
     # ── Confidence ───────────────────────────────────────────────────
     confidence = _compute_confidence(missing_enrichment, final_score, confidence_thresholds)
+
+    # ── Enrichment completeness ──────────────────────────────────────
+    enrichment_completeness = 1.0 - (missing_enrichment * 0.5)
 
     # ── Analyst summary ──────────────────────────────────────────────
     analyst_summary = _build_summary(
@@ -126,46 +152,68 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         confidence=confidence,
         analyst_summary=analyst_summary,
         score_breakdown=score_breakdown,
+        enrichment_completeness=enrichment_completeness,
     )
 
 
 def _compute_recency(timestamp_str: str) -> float:
-    """Convert an ISO 8601 timestamp to a recency score from 0.0 to 1.0.
+    """Convert an ISO 8601 timestamp to a recency score using exponential decay.
 
-    Scoring tiers:
-        < 1 hour   → 1.0
-        < 6 hours  → 0.7
-        < 24 hours → 0.4
-        >= 24 hours → 0.1
-
-    Falls back to 0.4 (medium recency) if the timestamp cannot be parsed,
-    logging a debug message rather than raising.
+    Uses a 6-hour half-life model: score halves every 6 hours from 1.0,
+    with a floor of 0.10 so old-but-severe alerts remain visible.
+    Falls back to 0.4 on parse failure.
 
     Args:
         timestamp_str: ISO 8601 datetime string, e.g. "2026-04-04T10:00:00Z".
 
     Returns:
-        Float recency score in [0.0, 1.0].
+        Float recency score in [0.10, 1.0].
     """
     try:
-        # Handle both Z suffix and +00:00 offset
         ts = timestamp_str.replace("Z", "+00:00")
         alert_time = datetime.fromisoformat(ts)
         if alert_time.tzinfo is None:
             alert_time = alert_time.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         age_hours = (now - alert_time).total_seconds() / 3600
-        if age_hours < 1:
-            return 1.0
-        elif age_hours < 6:
-            return 0.7
-        elif age_hours < 24:
-            return 0.4
-        else:
-            return 0.1
+        half_life = 6.0
+        decay = math.exp(-math.log(2) * age_hours / half_life)
+        return round(max(decay, 0.10), 4)
     except Exception as e:
         logger.debug(f"Could not parse timestamp '{timestamp_str}': {e}")
         return 0.4
+
+
+def _compute_shodan_exposure(open_ports: list, vulns: list) -> float:
+    """Compute a weighted Shodan exposure score from open ports and known vulnerabilities.
+
+    Port scoring: high-risk ports (RDP, SMB, VNC, MSSQL, Elasticsearch, MongoDB,
+    Redis, metasploit default, alt-HTTP, Docker daemon) score 0.15 each.
+    Medium-risk ports (SSH, FTP, Telnet, SMTP, MySQL, Postgres, CouchDB,
+    Memcached, Zookeeper) score 0.07 each. All others score 0.02.
+    Port contribution capped at 0.60.
+
+    Vulnerability scoring: 0.12 per known CVE, capped at 0.40.
+    Total capped at 1.0.
+
+    Args:
+        open_ports: List of integer port numbers from Shodan.
+        vulns: List of CVE ID strings from Shodan.
+
+    Returns:
+        Float exposure score in [0.0, 1.0].
+    """
+    port_score = 0.0
+    for p in open_ports:
+        if p in _HIGH_RISK_PORTS:
+            port_score += 0.15
+        elif p in _MEDIUM_RISK_PORTS:
+            port_score += 0.07
+        else:
+            port_score += 0.02
+    port_score = min(port_score, 0.60)
+    vuln_score = min(len(vulns) * 0.12, 0.40)
+    return round(min(port_score + vuln_score, 1.0), 4)
 
 
 def _score_to_label(score: float) -> str:
@@ -220,8 +268,8 @@ def _build_summary(
     score: float,
     label: str,
     confidence: str,
-    vt_score: float,
-    shodan_score: float,
+    vt_score: Optional[float],
+    shodan_score: Optional[float],
 ) -> str:
     """Generate a one-sentence analyst summary describing why the score was assigned.
 
@@ -233,8 +281,8 @@ def _build_summary(
         score: Final numeric score.
         label: Priority label string.
         confidence: Confidence string.
-        vt_score: VT malicious ratio (0.0 if unavailable).
-        shodan_score: Shodan exposure score (0.0 if unavailable).
+        vt_score: VT malicious ratio, or None if unavailable.
+        shodan_score: Shodan exposure score, or None if unavailable.
 
     Returns:
         A single sentence string suitable for display in the HTML report and terminal.
@@ -251,14 +299,16 @@ def _build_summary(
     )
 
     if confidence == "low":
-        conf_note = " (low confidence — enrichment unavailable)"
+        conf_note = " (low confidence — enrichment unavailable, score renormalized over available factors)"
+    elif confidence == "medium":
+        conf_note = " (medium confidence — partial enrichment)"
     else:
         conf_note = ""
 
     # Pick the dominant factor to highlight
-    if vt_score >= 0.30:
+    if vt_score is not None and vt_score >= 0.30:
         factor_note = f"VT detection ratio {vt_score:.0%}"
-    elif shodan_score >= 0.50:
+    elif shodan_score is not None and shodan_score >= 0.50:
         factor_note = f"Shodan exposure score {shodan_score:.2f}"
     elif alert.severity in ("critical", "high"):
         factor_note = f"{severity} severity"

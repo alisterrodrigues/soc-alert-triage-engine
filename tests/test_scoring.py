@@ -182,11 +182,17 @@ def test_result_is_triageresult_instance():
 # ── _compute_recency unit tests ─────────────────────────────────────────────
 
 
-def test_recency_very_recent_returns_1():
-    """An alert from 10 minutes ago must score 1.0 recency."""
+def test_recency_very_recent_returns_near_1():
+    """An alert from 10 minutes ago must score above 0.97 under exponential decay.
+
+    With a 6-hour half-life, 10 minutes yields decay = exp(-ln(2)*10/360) ≈ 0.9809,
+    which is well above the 0.10 floor and close to 1.0 but no longer exactly 1.0.
+    """
     from datetime import datetime, timedelta, timezone
     ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-    assert _compute_recency(ts) == 1.0
+    score = _compute_recency(ts)
+    assert score > 0.97
+    assert score <= 1.0
 
 
 def test_recency_old_alert_returns_01():
