@@ -291,7 +291,13 @@ def main() -> None:
         prog="python -m cli.main",
         description="SOC Alert Triage Engine — ingest, enrich, score, and report on security alerts",
     )
-    parser.add_argument("--input", metavar="FILE", help="Path to CSV or JSON alert input file")
+    parser.add_argument("--input", metavar="FILE", help="Path to CSV or JSON alert input file (required when --source file)")
+    parser.add_argument(
+        "--source",
+        choices=["file", "splunk", "elastic"],
+        default="file",
+        help="Alert source provider (default: file — uses --input)",
+    )
     parser.add_argument(
         "--config",
         metavar="FILE",
@@ -325,7 +331,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if not args.input:
+    if args.source == "file" and not args.input:
         parser.print_help()
         sys.exit(1)
 
@@ -336,11 +342,25 @@ def main() -> None:
     db_path = config.get("pipeline", {}).get("db_path", "output/triage.db")
     output_dir = args.output_dir or config.get("pipeline", {}).get("output_dir", "output/")
 
-    # Ingest
-    fmt = args.format
-    if fmt == "auto":
-        fmt = detect_format(args.input)
-    alerts = ingest_csv(args.input) if fmt == "csv" else ingest_json(args.input)
+    # Ingest — route to the configured source provider
+    if args.source == "splunk":
+        from sources.splunk_source import SplunkSource
+        source = SplunkSource(config.get("sources", {}).get("splunk", {}))
+        raw_rows = source.fetch()
+        from ingestion import _validate_and_build
+        alerts = [a for row in raw_rows for a in [_validate_and_build(row, "splunk")] if a]
+    elif args.source == "elastic":
+        from sources.elastic_source import ElasticSource
+        source = ElasticSource(config.get("sources", {}).get("elastic", {}))
+        raw_rows = source.fetch()
+        from ingestion import _validate_and_build
+        alerts = [a for row in raw_rows for a in [_validate_and_build(row, "elastic")] if a]
+    else:
+        # file source — existing behavior
+        fmt = args.format
+        if fmt == "auto":
+            fmt = detect_format(args.input)
+        alerts = ingest_csv(args.input) if fmt == "csv" else ingest_json(args.input)
 
     if not alerts:
         logger.error("No alerts ingested — check input file and format")

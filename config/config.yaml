@@ -57,3 +57,20 @@ reporting:
   max_alerts_in_report: 200
   include_raw_alert: true
   highlight_top_n: 5
+
+sources:
+  splunk:
+    host: localhost
+    port: 8089
+    username_env: SPLUNK_USERNAME
+    password_env: SPLUNK_PASSWORD
+    search: "search index=alerts earliest=-1h | head 500"
+    verify_ssl: false
+    timeout_seconds: 30
+  elastic:
+    host: https://localhost:9200
+    api_key_env: ELASTIC_API_KEY
+    index: ".alerts-security.alerts-default"
+    lookback_minutes: 60
+    max_alerts: 500
+    verify_ssl: false
