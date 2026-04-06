@@ -1,11 +1,13 @@
+"""Tests for ingestion — CSV and JSON parsing, normalization, and edge cases."""
 import csv
+import io
 import json
 import os
 import tempfile
 
 import pytest
 
-from ingestion import Alert
+from ingestion import Alert, _opt_str, _validate_and_build
 from ingestion.csv_ingestor import ingest_csv
 from ingestion.json_ingestor import ingest_json
 
@@ -29,13 +31,26 @@ VALID_ROW = {
 }
 
 
-def write_csv(rows: list[dict], headers=None) -> str:
+def write_csv(rows: list[dict], headers=None, encoding="utf-8") -> str:
     """Write rows to a temp CSV file and return the path."""
     fd, path = tempfile.mkstemp(suffix=".csv")
-    with os.fdopen(fd, "w", newline="") as f:
+    with os.fdopen(fd, "w", newline="", encoding=encoding) as f:
         writer = csv.DictWriter(f, fieldnames=headers or list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+    return path
+
+
+def write_csv_with_bom(rows: list[dict]) -> str:
+    """Write rows to a temp CSV file with a UTF-8 BOM prefix."""
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    with os.fdopen(fd, "wb") as f:
+        content = io.StringIO()
+        writer = csv.DictWriter(content, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+        f.write(b"\xef\xbb\xbf")  # UTF-8 BOM
+        f.write(content.getvalue().encode("utf-8"))
     return path
 
 
@@ -48,8 +63,39 @@ def write_json(data) -> str:
 
 
 # ---------------------------------------------------------------------------
+# _opt_str unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_opt_str_none_returns_none():
+    """Python None must return None — not the string 'None'."""
+    assert _opt_str(None) is None
+
+
+def test_opt_str_empty_string_returns_none():
+    """An empty string must return None."""
+    assert _opt_str("") is None
+
+
+def test_opt_str_whitespace_only_returns_none():
+    """A whitespace-only string must return None after stripping."""
+    assert _opt_str("   ") is None
+
+
+def test_opt_str_integer_zero_returns_string():
+    """Integer 0 must return '0', not None."""
+    assert _opt_str(0) == "0"
+
+
+def test_opt_str_valid_string_stripped():
+    """A string with leading/trailing spaces must be stripped."""
+    assert _opt_str("  hello  ") == "hello"
+
+
+# ---------------------------------------------------------------------------
 # CSV tests
 # ---------------------------------------------------------------------------
+
 
 def test_csv_valid_row_parses_correctly():
     """A fully valid CSV row should produce one Alert with correct field values."""
@@ -65,13 +111,29 @@ def test_csv_valid_row_parses_correctly():
     assert "dc" in a.asset_tags
 
 
+def test_csv_asset_tags_are_lowercased():
+    """Asset tags read from CSV must be lowercased so scoring logic matches correctly."""
+    row = dict(VALID_ROW)
+    row["asset_tags"] = "DC,Server,Cloud"
+    path = write_csv([row])
+    alerts = ingest_csv(path)
+    assert alerts[0].asset_tags == ["dc", "server", "cloud"]
+
+
+def test_csv_bom_prefix_is_stripped():
+    """A UTF-8 BOM at the start of the file must not corrupt the first column name."""
+    path = write_csv_with_bom([VALID_ROW])
+    alerts = ingest_csv(path)
+    assert len(alerts) == 1
+    assert alerts[0].alert_id == "TEST-001"  # would be \ufeffTEST-001 without BOM handling
+
+
 def test_csv_missing_required_field_skips_row():
     """A row with an empty required field should be skipped entirely."""
     row = dict(VALID_ROW)
     row["alert_id"] = ""
     path = write_csv([row])
-    alerts = ingest_csv(path)
-    assert alerts == []
+    assert ingest_csv(path) == []
 
 
 def test_csv_invalid_severity_defaults_to_low():
@@ -80,7 +142,6 @@ def test_csv_invalid_severity_defaults_to_low():
     row["severity"] = "urgent"
     path = write_csv([row])
     alerts = ingest_csv(path)
-    assert len(alerts) == 1
     assert alerts[0].severity == "low"
 
 
@@ -89,40 +150,86 @@ def test_csv_invalid_port_sets_none():
     row = dict(VALID_ROW)
     row["destination_port"] = "not_a_port"
     path = write_csv([row])
-    alerts = ingest_csv(path)
-    assert len(alerts) == 1
-    assert alerts[0].destination_port is None
+    assert ingest_csv(path)[0].destination_port is None
 
 
 def test_csv_empty_asset_tags_returns_empty_list():
-    """An empty asset_tags field should produce an empty list, not a list with one empty string."""
+    """An empty asset_tags field must produce [], not ['']."""
     row = dict(VALID_ROW)
     row["asset_tags"] = ""
     path = write_csv([row])
-    alerts = ingest_csv(path)
-    assert alerts[0].asset_tags == []
+    assert ingest_csv(path)[0].asset_tags == []
 
 
 def test_csv_file_not_found_returns_empty():
-    """A path that does not exist should return an empty list without raising."""
-    alerts = ingest_csv("/nonexistent/path/file.csv")
-    assert alerts == []
+    assert ingest_csv("/nonexistent/path/file.csv") == []
 
 
 def test_csv_empty_file_returns_empty():
-    """A CSV file with no rows (only optional header or truly empty) should return []."""
     fd, path = tempfile.mkstemp(suffix=".csv")
     os.close(fd)
-    alerts = ingest_csv(path)
-    assert alerts == []
+    assert ingest_csv(path) == []
 
 
 # ---------------------------------------------------------------------------
-# JSON tests
+# JSON null / None handling tests
 # ---------------------------------------------------------------------------
+
+
+def test_json_null_destination_ip_is_none_not_string():
+    """A JSON null for destination_ip must produce None, not the string 'None'."""
+    row = dict(VALID_ROW)
+    row["destination_ip"] = None
+    path = write_json([row])
+    alerts = ingest_json(path)
+    assert alerts[0].destination_ip is None
+    assert alerts[0].destination_ip != "None"
+
+
+def test_json_null_rule_id_is_none_not_string():
+    """A JSON null for rule_id must produce None, not the string 'None'."""
+    row = dict(VALID_ROW)
+    row["rule_id"] = None
+    path = write_json([row])
+    alerts = ingest_json(path)
+    assert alerts[0].rule_id is None
+
+
+def test_json_null_analyst_notes_is_none_not_string():
+    """A JSON null for analyst_notes must produce None, not the string 'None'."""
+    row = dict(VALID_ROW)
+    row["analyst_notes"] = None
+    path = write_json([row])
+    alerts = ingest_json(path)
+    assert alerts[0].analyst_notes is None
+
+
+def test_json_null_raw_payload_is_none_not_string():
+    """A JSON null for raw_payload must produce None, not the string 'None'."""
+    row = dict(VALID_ROW)
+    row["raw_payload"] = None
+    path = write_json([row])
+    alerts = ingest_json(path)
+    assert alerts[0].raw_payload is None
+
+
+def test_json_asset_tags_are_lowercased():
+    """Asset tags in JSON must be lowercased so DC/Server match scoring logic."""
+    row = dict(VALID_ROW)
+    row["asset_tags"] = "DC,Server"
+    path = write_json([row])
+    alerts = ingest_json(path)
+    assert "dc" in alerts[0].asset_tags
+    assert "server" in alerts[0].asset_tags
+    assert "DC" not in alerts[0].asset_tags
+
+
+# ---------------------------------------------------------------------------
+# JSON structural tests
+# ---------------------------------------------------------------------------
+
 
 def test_json_valid_array_parses_correctly():
-    """A JSON array with one valid object should produce one Alert."""
     path = write_json([VALID_ROW])
     alerts = ingest_json(path)
     assert len(alerts) == 1
@@ -130,39 +237,62 @@ def test_json_valid_array_parses_correctly():
 
 
 def test_json_missing_required_field_skips_item():
-    """A JSON object missing a required field should be skipped."""
     row = dict(VALID_ROW)
     row["source_ip"] = ""
     path = write_json([row])
-    alerts = ingest_json(path)
-    assert alerts == []
+    assert ingest_json(path) == []
 
 
 def test_json_not_array_returns_empty():
-    """A JSON file whose root is not an array should return an empty list."""
     path = write_json({"single": "object"})
-    alerts = ingest_json(path)
-    assert alerts == []
+    assert ingest_json(path) == []
 
 
 def test_json_file_not_found_returns_empty():
-    """A path that does not exist should return an empty list without raising."""
-    alerts = ingest_json("/nonexistent/path/file.json")
-    assert alerts == []
+    assert ingest_json("/nonexistent/path/file.json") == []
 
 
 def test_json_invalid_severity_defaults_to_low():
-    """An unrecognised severity value in JSON should be replaced with 'low'."""
     row = dict(VALID_ROW)
     row["severity"] = "CRITICAL_ALERT"
     path = write_json([row])
-    alerts = ingest_json(path)
-    assert alerts[0].severity == "low"
+    assert ingest_json(path)[0].severity == "low"
+
+
+# ---------------------------------------------------------------------------
+# Private IP enrichment skip tests
+# ---------------------------------------------------------------------------
+
+
+def test_private_ip_alert_can_be_ingested():
+    """RFC1918 source IPs must ingest correctly — the private IP skip is enrichment-layer only."""
+    row = dict(VALID_ROW)
+    row["source_ip"] = "10.0.1.5"
+    path = write_csv([row])
+    alerts = ingest_csv(path)
+    assert len(alerts) == 1
+    assert alerts[0].source_ip == "10.0.1.5"
+
+
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK field defaults
+# ---------------------------------------------------------------------------
+
+
+def test_alert_mitre_fields_default_to_none():
+    """Freshly ingested Alert must have all three MITRE fields as None by default."""
+    path = write_csv([VALID_ROW])
+    alerts = ingest_csv(path)
+    a = alerts[0]
+    assert a.mitre_tactic is None
+    assert a.mitre_technique is None
+    assert a.mitre_technique_name is None
 
 
 # ---------------------------------------------------------------------------
 # Sample data integration tests
 # ---------------------------------------------------------------------------
+
 
 def test_sample_csv_loads_40_alerts():
     """The canonical sample CSV must contain exactly 40 valid alerts."""
@@ -174,3 +304,19 @@ def test_sample_json_loads_40_alerts():
     """The canonical sample JSON must contain exactly 40 valid alerts."""
     alerts = ingest_json("sample_data/alerts_sample.json")
     assert len(alerts) == 40
+
+
+def test_sample_csv_all_severities_valid():
+    """Every alert in the sample CSV must have a valid severity value."""
+    alerts = ingest_csv("sample_data/alerts_sample.csv")
+    valid = {"critical", "high", "medium", "low"}
+    for a in alerts:
+        assert a.severity in valid, f"{a.alert_id} has invalid severity: {a.severity}"
+
+
+def test_sample_csv_asset_tags_all_lowercase():
+    """All asset_tags in the sample CSV must be lowercase after ingestion."""
+    alerts = ingest_csv("sample_data/alerts_sample.csv")
+    for a in alerts:
+        for tag in a.asset_tags:
+            assert tag == tag.lower(), f"{a.alert_id} has non-lowercase tag: {tag}"
