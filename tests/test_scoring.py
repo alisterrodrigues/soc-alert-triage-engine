@@ -243,3 +243,101 @@ def test_confidence_one_missing_is_medium():
 def test_confidence_both_missing_is_low():
     """Both enrichment sources missing must always produce 'low', regardless of score."""
     assert _compute_confidence(2, 0.95, CONFIDENCE_THRESHOLDS) == "low"
+
+
+# ── Prior sightings (historical baseline) tests ─────────────────────────────
+
+# Weights that include the prior_sightings factor at 0.10, matching Spec D config.
+_BASELINE_WEIGHTS = {
+    "severity": 0.25,
+    "vt_malicious_ratio": 0.20,
+    "shodan_exposure": 0.15,
+    "asset_criticality": 0.15,
+    "recency": 0.15,
+    "prior_sightings": 0.10,
+}
+
+
+def test_prior_sightings_count_stored_in_triage_result():
+    """score_alert must store the passed prior_sightings_count in the returned TriageResult."""
+    alert = make_alert()
+    result = score_alert(alert, WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=3)
+    assert result.prior_sightings_count == 3
+
+
+def test_prior_sightings_none_stored_when_not_passed():
+    """When prior_sightings_count is omitted (default None), TriageResult carries None."""
+    alert = make_alert()
+    result = score_alert(alert, WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS)
+    assert result.prior_sightings_count is None
+
+
+def test_prior_sightings_none_and_explicit_none_give_identical_score():
+    """Explicit prior_sightings_count=None must produce the exact same score as the default."""
+    alert = make_alert(severity="high", vt_malicious_ratio=0.40, shodan_exposure_score=0.30)
+    result_default = score_alert(alert, WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS)
+    result_explicit = score_alert(alert, WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=None)
+    assert result_default.score == result_explicit.score
+
+
+def test_prior_sightings_zero_gives_zero_factor_contribution():
+    """prior_sightings_count=0 must compute sightings_score=0.0 (1 - 0.7^0 = 0)."""
+    alert = make_alert(severity="medium", vt_malicious_ratio=0.20, shodan_exposure_score=0.10)
+    result = score_alert(alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=0)
+    assert result.score_breakdown["prior_sightings"] == 0.0
+
+
+def test_prior_sightings_raises_score_for_repeat_offender():
+    """An alert with 5 prior sightings must score strictly higher than one with 0."""
+    alert = make_alert(severity="medium", vt_malicious_ratio=0.20, shodan_exposure_score=0.10)
+    result_zero = score_alert(
+        alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=0
+    )
+    result_five = score_alert(
+        alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=5
+    )
+    assert result_five.score > result_zero.score
+
+
+def test_prior_sightings_formula_monotone_increasing():
+    """More prior sightings must never decrease the score (monotone non-decreasing)."""
+    alert = make_alert(severity="high", vt_malicious_ratio=0.50, shodan_exposure_score=0.40)
+    scores = []
+    for count in range(7):
+        r = score_alert(
+            alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS,
+            prior_sightings_count=count,
+        )
+        scores.append(r.score)
+    for i in range(len(scores) - 1):
+        assert scores[i + 1] >= scores[i], (
+            f"Score decreased from count={i} ({scores[i]}) to count={i+1} ({scores[i+1]})"
+        )
+
+
+def test_prior_sightings_does_not_affect_confidence():
+    """prior_sightings_count must not influence the confidence level (only VT/Shodan do)."""
+    alert = make_alert(severity="critical", vt_malicious_ratio=None, shodan_exposure_score=None)
+    # Both VT and Shodan missing → always low confidence regardless of sightings
+    result = score_alert(
+        alert, WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=10
+    )
+    assert result.confidence == "low"
+
+
+def test_prior_sightings_score_breakdown_includes_factor_key():
+    """score_breakdown must contain a 'prior_sightings' key when the factor weight is set."""
+    alert = make_alert()
+    result = score_alert(
+        alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=2
+    )
+    assert "prior_sightings" in result.score_breakdown
+
+
+def test_prior_sightings_breakdown_sums_to_final_score():
+    """score_breakdown values must still sum to the final score when prior_sightings is active."""
+    alert = make_alert(severity="high", vt_malicious_ratio=0.60, shodan_exposure_score=0.30)
+    result = score_alert(
+        alert, _BASELINE_WEIGHTS, SEVERITY_MAP, CONFIDENCE_THRESHOLDS, prior_sightings_count=4
+    )
+    assert abs(sum(result.score_breakdown.values()) - result.score) < 0.001

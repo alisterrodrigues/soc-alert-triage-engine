@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS triage_results (
     raw_alert TEXT,
     enrichment_source TEXT,
     enrichment_completeness REAL,
+    prior_sightings_count INTEGER,
     processed_at TEXT
 );
 
@@ -78,7 +79,15 @@ class AlertDB:
             )
             self._conn.commit()
         except sqlite3.OperationalError:
-            # Column already exists — silently ignore
+            pass
+
+        # Guard: add prior_sightings_count column to pre-existing databases
+        try:
+            self._conn.execute(
+                "ALTER TABLE triage_results ADD COLUMN prior_sightings_count INTEGER"
+            )
+            self._conn.commit()
+        except sqlite3.OperationalError:
             pass
 
     def start_run(self, config_hash: str = "", scoring_weights: Optional[dict] = None) -> str:
@@ -134,6 +143,7 @@ class AlertDB:
             analyst_summary = None
             score_breakdown = None
             enrichment_completeness = None
+            prior_sightings_count = None
 
             if triage_result is not None:
                 score = triage_result.score
@@ -142,6 +152,7 @@ class AlertDB:
                 analyst_summary = triage_result.analyst_summary
                 score_breakdown = json.dumps(triage_result.score_breakdown)
                 enrichment_completeness = getattr(triage_result, "enrichment_completeness", None)
+                prior_sightings_count = getattr(triage_result, "prior_sightings_count", None)
 
             rows.append((
                 run_id,
@@ -163,6 +174,7 @@ class AlertDB:
                 json.dumps(alert.__dict__),
                 alert.enrichment_source,
                 enrichment_completeness,
+                prior_sightings_count,
                 datetime.now(timezone.utc).isoformat(),
             ))
 
@@ -174,8 +186,9 @@ class AlertDB:
                     score, priority_label, confidence, analyst_summary,
                     vt_malicious_ratio, shodan_exposure_score,
                     shodan_open_ports, shodan_vulns, score_breakdown,
-                    raw_alert, enrichment_source, enrichment_completeness, processed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_alert, enrichment_source, enrichment_completeness,
+                    prior_sightings_count, processed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

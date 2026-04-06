@@ -22,11 +22,13 @@ enrichment:
 
 scoring:
   weights:
-    severity: 0.30
+    severity: 0.25
     vt_malicious_ratio: 0.20
     shodan_exposure: 0.15
-    asset_criticality: 0.20
+    asset_criticality: 0.15
     recency: 0.15
+    prior_sightings: 0.10
+  baseline_lookback_days: 7
   # Shodan exposure tuning
   shodan_exposure:
     half_life_hours: 6.0

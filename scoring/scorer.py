@@ -30,9 +30,16 @@ class TriageResult:
     analyst_summary: str
     score_breakdown: dict = field(default_factory=dict)
     enrichment_completeness: float = 1.0  # 1.0=full, 0.5=one source missing, 0.0=both missing
+    prior_sightings_count: Optional[int] = None  # how many prior appearances in lookback window
 
 
-def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds: dict) -> TriageResult:
+def score_alert(
+    alert,
+    weights: dict,
+    severity_map: dict,
+    confidence_thresholds: dict,
+    prior_sightings_count: Optional[int] = None,
+) -> TriageResult:
     """Compute a weighted priority score for a single enriched Alert.
 
     Each factor is normalised to [0.0, 1.0] before weighting. When enrichment
@@ -43,13 +50,15 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
     Args:
         alert: An Alert instance with enrichment fields populated (or None for dry-run).
         weights: Dict with keys: severity, vt_malicious_ratio, shodan_exposure,
-                 asset_criticality, recency. Values are floats summing to ~1.0.
+                 asset_criticality, recency, prior_sightings. Values sum to ~1.0.
         severity_map: Dict mapping severity labels (critical/high/medium/low) to floats.
         confidence_thresholds: Dict with keys high_confidence and medium_confidence (floats).
+        prior_sightings_count: Count of matching alerts in the historical lookback window,
+            or None when the DB is unavailable (factor excluded from renormalization).
 
     Returns:
         A TriageResult with score, priority_label, confidence, score_breakdown,
-        enrichment_completeness, and a one-sentence analyst_summary.
+        enrichment_completeness, prior_sightings_count, and analyst_summary.
     """
     # ── Factor 1: Severity ──────────────────────────────────────────
     try:
@@ -100,6 +109,18 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         logger.warning(f"Recency factor error for {alert.alert_id}: {e}")
         recency_score = 0.4
 
+    # ── Factor 6: Prior sightings ────────────────────────────────────
+    # prior_sightings_count is passed in as an optional int (None if DB not available)
+    try:
+        if prior_sightings_count is not None:
+            # 0 prior → 0.0, 1 → 0.3, 2 → 0.51, 3 → 0.657, 5+ → 0.832+, capped at 1.0
+            sightings_score = round(min(1 - (0.7 ** prior_sightings_count), 1.0), 4)
+        else:
+            sightings_score = None
+    except Exception as e:
+        logger.warning(f"Prior sightings factor error for {alert.alert_id}: {e}")
+        sightings_score = None
+
     # ── Build factor values — None means unavailable ─────────────────
     factor_values = {
         "severity":           severity_score,
@@ -107,6 +128,7 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         "shodan_exposure":    shodan_score if (alert.shodan_exposure_score is not None or alert.shodan_open_ports) else None,
         "asset_criticality":  asset_score,
         "recency":            recency_score,
+        "prior_sightings":    sightings_score,
     }
 
     # Count missing enrichment (VT and Shodan only — severity/asset/recency always available)
@@ -153,6 +175,7 @@ def score_alert(alert, weights: dict, severity_map: dict, confidence_thresholds:
         analyst_summary=analyst_summary,
         score_breakdown=score_breakdown,
         enrichment_completeness=enrichment_completeness,
+        prior_sightings_count=prior_sightings_count,
     )
 
 

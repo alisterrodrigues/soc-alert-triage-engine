@@ -382,15 +382,27 @@ def main() -> None:
         tag_alert(alert)
     logger.info("MITRE ATT&CK tagging complete")
 
+    # Open DB before scoring so historical sightings can be queried per alert
+    db = AlertDB(db_path)
+
     # Score — separate loop from enrichment
     scoring_cfg = config.get("scoring", {})
     weights = scoring_cfg.get("weights", {})
     severity_map = scoring_cfg.get("severity_map", {})
     confidence_thresholds = scoring_cfg.get("confidence_thresholds", {})
+    lookback_days = scoring_cfg.get("baseline_lookback_days", 7)
 
     results: list[TriageResult] = []
     for alert in alerts:
-        result = score_alert(alert, weights, severity_map, confidence_thresholds)
+        sightings = db.get_prior_sightings(
+            source_ip=alert.source_ip,
+            rule_id=alert.rule_id,
+            lookback_days=lookback_days,
+        )
+        result = score_alert(
+            alert, weights, severity_map, confidence_thresholds,
+            prior_sightings_count=sightings,
+        )
         results.append(result)
 
     logger.info(f"Scoring complete — {len(results)} alerts scored")
@@ -403,7 +415,6 @@ def main() -> None:
     logger.info(f"Correlation complete — {len(incidents)} incidents identified from {len(alerts)} alerts")
 
     # Store
-    db = AlertDB(db_path)
     run_id = db.start_run()
     for alert, result in zip(alerts, results):
         db.store_alert(run_id, alert, triage_result=result)
