@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -48,18 +49,45 @@ def load_config(config_path: str) -> dict:
 def detect_format(filepath: str) -> str:
     """Return 'csv' or 'json' based on the file extension.
 
+    Exits with a clear error message for unrecognised extensions rather than
+    silently defaulting to CSV.
+
     Args:
         filepath: Path to the alert input file.
 
     Returns:
-        'csv' or 'json'; defaults to 'csv' for unrecognised extensions.
+        'csv' or 'json'.
     """
     suffix = Path(filepath).suffix.lower()
     if suffix == ".csv":
         return "csv"
     elif suffix == ".json":
         return "json"
-    return "csv"
+    print(
+        f"[ERROR] Cannot auto-detect format for '{filepath}'. "
+        "Use --format csv or --format json.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _is_private_ip(ip: str) -> bool:
+    """Return True if ip is a private, loopback, or otherwise non-routable address.
+
+    Used to skip enrichment API calls for RFC1918 addresses that will never
+    return useful VirusTotal or Shodan data.
+
+    Args:
+        ip: IP address string to test.
+
+    Returns:
+        True if the address is private/reserved; False for public IPs and
+        non-IP hostnames (which are not skipped).
+    """
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 def _get_api_key(env_var: str, service_name: str, dry_run: bool) -> str:
@@ -95,6 +123,8 @@ def _enrich_alert(
     """Run VT and Shodan enrichment on a single alert, updating it in-place.
 
     In dry-run mode, skips all API calls and sets enrichment_source to 'dry_run'.
+    Private/RFC1918 source IPs are skipped — they return no useful data from
+    external APIs and waste rate-limited quota.
     On any enrichment failure, the alert is left with None enrichment fields
     rather than raising — the pipeline always continues.
 
@@ -107,7 +137,7 @@ def _enrich_alert(
         dry_run: When True, skip all API calls.
 
     Returns:
-        Enrichment source string: 'dry_run', 'cache', or 'live'.
+        Enrichment source string: 'dry_run', 'skipped_private', 'cache', or 'live'.
     """
     logger = logging.getLogger("cli.enrich")
 
@@ -116,6 +146,12 @@ def _enrich_alert(
         return "dry_run"
 
     ip = alert.source_ip
+
+    if _is_private_ip(ip):
+        logger.debug(f"Skipping enrichment for private IP: {ip}")
+        alert.enrichment_source = "skipped_private"
+        return "skipped_private"
+
     enrichment_source = "live"
     vt_cfg = config.get("enrichment", {}).get("virustotal", {})
     shodan_cfg = config.get("enrichment", {}).get("shodan", {})

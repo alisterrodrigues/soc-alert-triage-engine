@@ -32,7 +32,25 @@ class Alert:
     shodan_vulns: list[str] = field(default_factory=list)
     shodan_org: Optional[str] = None
     shodan_exposure_score: Optional[float] = None
-    enrichment_source: str = "pending"   # pending | live | cache | dry_run
+    enrichment_source: str = "pending"   # pending | live | cache | dry_run | skipped_private
+
+
+def _opt_str(val) -> Optional[str]:
+    """Return None if val is None or empty after stripping, else the stripped string.
+
+    Prevents Python None values from becoming the literal string 'None' when
+    ingesting fields that may be null in JSON input.
+
+    Args:
+        val: Raw value from a CSV row or JSON object.
+
+    Returns:
+        Stripped string, or None if val was None or blank.
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
 
 
 def _validate_and_build(row: dict, source: str) -> Optional[Alert]:
@@ -61,8 +79,8 @@ def _validate_and_build(row: dict, source: str) -> Optional[Alert]:
         logger.warning(f"{source}: invalid category '{category}', defaulting to 'other'")
         category = "other"
 
-    tags_raw = str(row.get("asset_tags", ""))
-    asset_tags = [t.strip() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
+    tags_raw = _opt_str(row.get("asset_tags"))
+    asset_tags = [t.strip().lower() for t in tags_raw.split(",") if t.strip()] if tags_raw else []
 
     dest_port: Optional[int] = None
     port_raw = row.get("destination_port", "")
@@ -79,10 +97,10 @@ def _validate_and_build(row: dict, source: str) -> Optional[Alert]:
         alert_name=str(row["alert_name"]).strip(),
         severity=severity,
         category=category,
-        destination_ip=str(row.get("destination_ip", "")).strip() or None,
+        destination_ip=_opt_str(row.get("destination_ip")),
         destination_port=dest_port,
-        rule_id=str(row.get("rule_id", "")).strip() or None,
+        rule_id=_opt_str(row.get("rule_id")),
         asset_tags=asset_tags,
-        raw_payload=str(row.get("raw_payload", "")).strip() or None,
-        analyst_notes=str(row.get("analyst_notes", "")).strip() or None,
+        raw_payload=_opt_str(row.get("raw_payload")),
+        analyst_notes=_opt_str(row.get("analyst_notes")),
     )

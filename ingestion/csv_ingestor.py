@@ -11,6 +11,7 @@ def ingest_csv(filepath: str) -> list[Alert]:
     """Parse a CSV alert file into a list of Alert objects.
 
     Expects a header row matching the Alert schema field names.
+    Handles UTF-8 BOM characters produced by Excel and some SIEM exports.
     Skips rows with missing required fields (logs warning per skip).
     Returns empty list on file-not-found or parse error.
 
@@ -27,7 +28,7 @@ def ingest_csv(filepath: str) -> list[Alert]:
 
     alerts: list[Alert] = []
     try:
-        with open(path, newline="", encoding="utf-8") as f:
+        with open(path, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             for i, row in enumerate(reader, start=2):  # start=2 because row 1 is header
                 alert = _validate_and_build(row, source=f"csv row {i}")
