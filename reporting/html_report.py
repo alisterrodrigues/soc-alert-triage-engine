@@ -24,6 +24,7 @@ def render_report(
     run_id: str,
     config: dict,
     output_path: str,
+    incidents: Optional[list] = None,
 ) -> str:
     """Generate a self-contained HTML triage report and write it to disk.
 
@@ -41,12 +42,13 @@ def render_report(
         run_id: UUID string for this pipeline run.
         config: Full config dict (for scoring weights and reporting settings).
         output_path: File path to write the HTML file to.
+        incidents: Optional list of CorrelatedIncident instances from the correlation engine.
 
     Returns:
         The output_path string on success, or "" on failure.
     """
     try:
-        html = _build_html(results, alerts, run_id, config)
+        html = _build_html(results, alerts, run_id, config, incidents=incidents)
         path = Path(output_path)
         path.write_text(html, encoding="utf-8")
         logger.info(f"HTML report written to {output_path}")
@@ -56,7 +58,13 @@ def render_report(
         return ""
 
 
-def _build_html(results: list, alerts: list, run_id: str, config: dict) -> str:
+def _build_html(
+    results: list,
+    alerts: list,
+    run_id: str,
+    config: dict,
+    incidents: Optional[list] = None,
+) -> str:
     """Assemble the full HTML document string.
 
     Args:
@@ -64,6 +72,7 @@ def _build_html(results: list, alerts: list, run_id: str, config: dict) -> str:
         alerts: List of Alert instances parallel to results.
         run_id: Pipeline run UUID.
         config: Full config dict.
+        incidents: Optional list of CorrelatedIncident instances.
 
     Returns:
         Complete HTML document as a string.
@@ -80,9 +89,13 @@ def _build_html(results: list, alerts: list, run_id: str, config: dict) -> str:
 
     cards_html = _build_priority_cards(top_alerts, alert_map)
     table_html = _build_alert_table(results, alert_map)
+    incidents_html = _build_incidents_section(incidents or [])
     weights_json = json.dumps(weights, indent=2)
 
     config_hash = hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest()[:8]
+
+    incident_count = len(incidents) if incidents else 0
+    kill_chain_count = sum(1 for i in (incidents or []) if i.kill_chain_detected)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -152,6 +165,20 @@ def _build_html(results: list, alerts: list, run_id: str, config: dict) -> str:
   .conf-low    {{ color: #e74c3c; font-weight: 600; }}
   .footer {{ font-size: 11px; color: #95a5a6; text-align: center; margin-top: 24px; padding: 16px; }}
   .footer code {{ background: #ecf0f1; padding: 1px 5px; border-radius: 3px; font-family: monospace; }}
+  .incident-stats {{ display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }}
+  .incident-stat {{ background: white; border-radius: 8px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); min-width: 140px; }}
+  .incident-stat .icount {{ font-size: 26px; font-weight: 700; color: #2c3e50; }}
+  .incident-stat .ilabel {{ font-size: 11px; color: #7f8c8d; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 2px; }}
+  .kill-chain-count .icount {{ color: #c0392b; }}
+  .incident-table-wrap {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; margin-bottom: 32px; }}
+  .incident-table-wrap table {{ width: 100%; border-collapse: collapse; }}
+  .incident-table-wrap th {{ background: #f8f9fa; text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: #7f8c8d; border-bottom: 1px solid #ecf0f1; }}
+  .incident-table-wrap td {{ padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 12px; vertical-align: top; }}
+  .incident-table-wrap tr:last-child td {{ border-bottom: none; }}
+  .incident-table-wrap tr:hover td {{ background: #fafbfc; }}
+  .kill-yes {{ color: #c0392b; font-weight: 600; }}
+  .kill-no  {{ color: #95a5a6; }}
+  .tactic-tag {{ display: inline-block; background: #eaf4fb; color: #1a5276; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin: 1px; }}
 </style>
 </head>
 <body>
@@ -190,6 +217,19 @@ def _build_html(results: list, alerts: list, run_id: str, config: dict) -> str:
   <div class="cards">
     {cards_html}
   </div>
+
+  <div class="section-title">Correlated Incidents</div>
+  <div class="incident-stats">
+    <div class="incident-stat">
+      <div class="icount">{incident_count}</div>
+      <div class="ilabel">Total Incidents</div>
+    </div>
+    <div class="incident-stat kill-chain-count">
+      <div class="icount">{kill_chain_count}</div>
+      <div class="ilabel">Kill Chain Detected</div>
+    </div>
+  </div>
+  {incidents_html}
 
   <div class="section-title">All Alerts</div>
   <div class="table-container">
@@ -385,6 +425,67 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
       </tr>""")
 
     return header + "\n".join(rows) + "\n    </tbody>\n  </table>"
+
+
+def _build_incidents_section(incidents: list) -> str:
+    """Build an HTML table section listing all correlated incidents.
+
+    Args:
+        incidents: List of CorrelatedIncident instances, sorted by combined_score desc.
+
+    Returns:
+        HTML string for the incidents table, or an empty-state message if none.
+    """
+    if not incidents:
+        return '<div style="color:#95a5a6;font-size:13px;padding:16px 0;">No correlated incidents detected.</div>'
+
+    rows = []
+    for inc in incidents:
+        score_color = (
+            "#c0392b" if inc.combined_score >= 0.80 else
+            "#e67e22" if inc.combined_score >= 0.55 else
+            "#2980b9" if inc.combined_score >= 0.30 else
+            "#95a5a6"
+        )
+        tactic_tags = " ".join(
+            f'<span class="tactic-tag">{_esc(t)}</span>' for t in inc.tactic_chain
+        ) or "<span style='color:#aaa'>—</span>"
+        kill_html = (
+            '<span class="kill-yes">&#10003; Yes</span>'
+            if inc.kill_chain_detected
+            else '<span class="kill-no">No</span>'
+        )
+        short_id = inc.incident_id[:8]
+        rows.append(f"""
+      <tr>
+        <td><code style="font-size:11px;">{_esc(short_id)}</code></td>
+        <td>{_esc(inc.host)}</td>
+        <td style="text-align:center;">{inc.alert_count}</td>
+        <td style="font-weight:600;color:{score_color};">{inc.combined_score:.2f}</td>
+        <td><span class="badge badge-{inc.priority_label}">{_esc(inc.priority_label.replace("_", " "))}</span></td>
+        <td>{kill_html}</td>
+        <td>{tactic_tags}</td>
+        <td style="font-size:11px;color:#555;">{_esc(inc.summary)}</td>
+      </tr>""")
+
+    return f"""<div class="incident-table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Incident</th>
+        <th>Host</th>
+        <th>Alerts</th>
+        <th>Score</th>
+        <th>Priority</th>
+        <th>Kill Chain</th>
+        <th>Tactic Chain</th>
+        <th>Summary</th>
+      </tr>
+    </thead>
+    <tbody>{"".join(rows)}
+    </tbody>
+  </table>
+</div>"""
 
 
 def _esc(text) -> str:

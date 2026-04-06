@@ -389,6 +389,13 @@ def main() -> None:
 
     logger.info(f"Scoring complete — {len(results)} alerts scored")
 
+    # Correlate
+    correlation_cfg = config.get("correlation", {})
+    window_min = correlation_cfg.get("window_minutes", 15)
+    from correlation.engine import correlate_alerts
+    incidents = correlate_alerts(alerts, results, window_minutes=window_min)
+    logger.info(f"Correlation complete — {len(incidents)} incidents identified from {len(alerts)} alerts")
+
     # Store
     db = AlertDB(db_path)
     run_id = db.start_run()
@@ -412,6 +419,14 @@ def main() -> None:
     for label in ["INVESTIGATE_NOW", "INVESTIGATE_SOON", "MONITOR", "LOW_PRIORITY"]:
         print(f"    {label:<22} {label_counts.get(label, 0)}")
     print()
+    print("  Correlated incidents:")
+    print(f"    Total incidents:       {len(incidents)}")
+    kill_chain_count = sum(1 for i in incidents if i.kill_chain_detected)
+    print(f"    Kill chain detected:   {kill_chain_count}")
+    if incidents:
+        top_incident = incidents[0]
+        print(f"    Top incident score:    {top_incident.combined_score:.2f} ({top_incident.alert_count} alerts, {top_incident.host})")
+    print()
     print("  Top 5 alerts:")
     for i, r in enumerate(top_n, 1):
         print(f"  #{i}  [{r.priority_label:<18} {r.score:.2f}]  {r.analyst_summary[:80]}")
@@ -430,6 +445,7 @@ def main() -> None:
             run_id=run_id,
             config=config,
             output_path=report_path,
+            incidents=incidents,
         )
         if rendered:
             print(f"\n  Report: {rendered}")

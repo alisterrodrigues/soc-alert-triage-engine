@@ -47,6 +47,10 @@ scoring:
     - MONITOR
     - LOW_PRIORITY
 
+correlation:
+  window_minutes: 15
+  min_alerts_per_incident: 1
+
 reporting:
   max_alerts_in_report: 200
   include_raw_alert: true
