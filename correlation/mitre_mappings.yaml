@@ -1,0 +1,99 @@
+# Maps alert category and rule_id prefix to MITRE ATT&CK tactic and technique ID.
+# rule_id_prefix takes priority over category when both match.
+# Tactic names use underscores, matching the MITRE Enterprise ATT&CK framework.
+
+categories:
+  malware:
+    tactic: EXECUTION
+    technique: T1059
+    technique_name: "Command and Scripting Interpreter"
+  phishing:
+    tactic: INITIAL_ACCESS
+    technique: T1566
+    technique_name: "Phishing"
+  lateral_movement:
+    tactic: LATERAL_MOVEMENT
+    technique: T1021
+    technique_name: "Remote Services"
+  c2:
+    tactic: COMMAND_AND_CONTROL
+    technique: T1071
+    technique_name: "Application Layer Protocol"
+  data_exfil:
+    tactic: EXFILTRATION
+    technique: T1041
+    technique_name: "Exfiltration Over C2 Channel"
+  recon:
+    tactic: RECONNAISSANCE
+    technique: T1595
+    technique_name: "Active Scanning"
+  other:
+    tactic: null
+    technique: null
+    technique_name: null
+
+rule_id_prefixes:
+  PERSIST:
+    tactic: PERSISTENCE
+    technique: T1547
+    technique_name: "Boot or Logon Autostart Execution"
+  PRIV:
+    tactic: PRIVILEGE_ESCALATION
+    technique: T1068
+    technique_name: "Exploitation for Privilege Escalation"
+  CRED:
+    tactic: CREDENTIAL_ACCESS
+    technique: T1003
+    technique_name: "OS Credential Dumping"
+  DISC:
+    tactic: DISCOVERY
+    technique: T1082
+    technique_name: "System Information Discovery"
+  RECON:
+    tactic: RECONNAISSANCE
+    technique: T1595
+    technique_name: "Active Scanning"
+  EXFIL:
+    tactic: EXFILTRATION
+    technique: T1041
+    technique_name: "Exfiltration Over C2 Channel"
+  RDP:
+    tactic: LATERAL_MOVEMENT
+    technique: T1021.001
+    technique_name: "Remote Desktop Protocol"
+  SMB:
+    tactic: LATERAL_MOVEMENT
+    technique: T1021.002
+    technique_name: "SMB/Windows Admin Shares"
+  C2:
+    tactic: COMMAND_AND_CONTROL
+    technique: T1071
+    technique_name: "Application Layer Protocol"
+  LOG:
+    tactic: DEFENSE_EVASION
+    technique: T1070
+    technique_name: "Indicator Removal"
+  FW:
+    tactic: DEFENSE_EVASION
+    technique: T1562
+    technique_name: "Impair Defenses"
+  BITS:
+    tactic: DEFENSE_EVASION
+    technique: T1197
+    technique_name: "BITS Jobs"
+  PROC:
+    tactic: EXECUTION
+    technique: T1059
+    technique_name: "Command and Scripting Interpreter"
+  SCRIPT:
+    tactic: EXECUTION
+    technique: T1059.006
+    technique_name: "Python"
+  AV:
+    tactic: DEFENSE_EVASION
+    technique: T1562.001
+    technique_name: "Disable or Modify Tools"
+  USB:
+    tactic: INITIAL_ACCESS
+    technique: T1091
+    technique_name: "Replication Through Removable Media"

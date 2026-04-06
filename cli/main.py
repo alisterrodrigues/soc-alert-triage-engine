@@ -376,6 +376,12 @@ def main() -> None:
 
     logger.info(f"Enrichment complete — {len(alerts)}/{len(alerts)} alerts processed")
 
+    # Tag with MITRE ATT&CK
+    from correlation.tagger import tag_alert
+    for alert in alerts:
+        tag_alert(alert)
+    logger.info("MITRE ATT&CK tagging complete")
+
     # Score — separate loop from enrichment
     scoring_cfg = config.get("scoring", {})
     weights = scoring_cfg.get("weights", {})

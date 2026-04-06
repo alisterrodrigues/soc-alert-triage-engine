@@ -32,7 +32,11 @@ class Alert:
     shodan_vulns: list[str] = field(default_factory=list)
     shodan_org: Optional[str] = None
     shodan_exposure_score: Optional[float] = None
-    enrichment_source: str = "pending"   # pending | live | cache | dry_run | skipped_private
+    enrichment_source: str = "pending"   # pending | live | cache | dry_run
+    # MITRE ATT&CK fields — populated by correlation/tagger.py
+    mitre_tactic: Optional[str] = None          # e.g. "LATERAL_MOVEMENT"
+    mitre_technique: Optional[str] = None        # e.g. "T1021.001"
+    mitre_technique_name: Optional[str] = None   # e.g. "Remote Desktop Protocol" | skipped_private
 
 
 def _opt_str(val) -> Optional[str]:
