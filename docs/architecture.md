@@ -4,60 +4,78 @@ This document describes the module structure, data flow, and design decisions be
 
 ---
 
-## Overview
+## Pipeline Overview
 
-The engine is a multi-stage Python CLI pipeline. Each stage has a single responsibility and passes its output to the next via well-defined data structures. No stage reaches into another's internals.
+```mermaid
+flowchart TD
+    subgraph Sources
+        A1[CSV / JSON]
+        A2[Splunk REST API]
+        A3[Elasticsearch]
+    end
 
+    subgraph Ingestion
+        B["ingestion/\n_validate_and_build()\nAlert dataclass"]
+    end
+
+    subgraph Enrichment
+        C["enrichment/\nVirusTotal · Shodan\nFile cache · Private IP skip"]
+    end
+
+    subgraph Tagging
+        D["correlation/tagger.py\nMITRE ATT&CK\nRule ID prefix → Tactic/Technique"]
+    end
+
+    subgraph Scoring
+        E["scoring/scorer.py\n6-factor weighted model\nRenormalization · Confidence"]
+    end
+
+    subgraph Correlation
+        F["correlation/engine.py\nTime-window grouping\nKill chain detection"]
+    end
+
+    G[("store/\nSQLite\nRun history")]
+    H(["reporting/\nSelf-contained\nHTML report"])
+
+    A1 & A2 & A3 --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    F --> H
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        INPUT SOURCES                           │
-│  ┌────────────┐  ┌────────────┐  ┌──────────────────┐  │
-│  │ CSV / JSON │  │   Splunk    │  │  Elasticsearch  │  │
-│  └─────┬─────┘  └─────┬─────┘  └────────┬────────┘  │
-└────────────┤────────────┤─────────────────┬─────────────────────────┘
-                       │
-            ┌─────────┴─────────┐
-            │   INGESTION / NORM   │
-            │ ingestion/__init__.py│  ← Alert dataclass
-            │ csv_ingestor.py      │     _validate_and_build()
-            │ json_ingestor.py     │     _opt_str() null guard
-            └─────────┬─────────┘
-                       │  List[Alert]
-            ┌─────────┴─────────┐
-            │     ENRICHMENT        │
-            │ enrichment/          │  ← VT malicious ratio
-            │   virustotal.py      │     Shodan open ports + CVEs
-            │   shodan_lookup.py   │     File-based JSON cache
-            │   cache.py           │     Private IP short-circuit
-            └─────────┬─────────┘
-                       │  Alert (enriched)
-            ┌─────────┴─────────┐
-            │    MITRE TAGGING      │
-            │ correlation/         │  ← category + rule_id →
-            │   tagger.py         │     tactic + technique
-            │   mitre_mappings.yaml│     inline YAML lookup
-            └─────────┬─────────┘
-                       │  Alert (tagged)
-            ┌─────────┴─────────┐
-            │      SCORING          │
-            │ scoring/scorer.py    │  ← 6-factor weighted model
-            │                      │     Renormalization for dry-run
-            │                      │     Weighted Shodan exposure
-            │                      │     Exponential recency decay
-            └─────────┬─────────┘
-                       │  List[TriageResult]
-            ┌─────────┴─────────┐
-            │    CORRELATION        │
-            │ correlation/         │  ← Time-window grouping
-            │   engine.py         │     Kill chain detection
-            │                      │     CorrelatedIncident output
-            └────┬─────────────┬───┘
-                 │             │
-     ┌─────────┴─────┐  ┌────┴─────────┐
-     │  SQLite STORE  │  │  HTML REPORT   │
-     │ store/         │  │ reporting/    │
-     │   alert_db.py  │  │ html_report.py│
-     └───────────────┘  └───────────────┘
+
+---
+
+## Alert Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant CLI as cli/main.py
+    participant ING as ingestion/
+    participant ENR as enrichment/
+    participant TAG as correlation/tagger
+    participant SCR as scoring/scorer
+    participant COR as correlation/engine
+    participant DB as store/alert_db
+    participant RPT as reporting/html_report
+
+    CLI->>ING: ingest CSV/JSON/Splunk/Elastic
+    ING-->>CLI: List[Alert]
+    CLI->>ENR: _enrich_alert() per public IP
+    ENR-->>CLI: Alert (enriched in-place)
+    CLI->>TAG: tag_alert() per alert
+    TAG-->>CLI: Alert (mitre_tactic, mitre_technique set)
+    CLI->>DB: get_prior_sightings(source_ip)
+    DB-->>CLI: int count
+    CLI->>SCR: score_alert(alert, prior_sightings_count)
+    SCR-->>CLI: TriageResult
+    CLI->>COR: correlate_alerts(alerts, results)
+    COR-->>CLI: List[CorrelatedIncident]
+    CLI->>DB: store_alerts_batch(run_id, pairs)
+    CLI->>RPT: render_report(results, alerts, incidents)
+    RPT-->>CLI: output/triage_report_*.html
 ```
 
 ---
@@ -68,144 +86,136 @@ The engine is a multi-stage Python CLI pipeline. Each stage has a single respons
 
 Normalizes raw alert data from any source into the canonical `Alert` dataclass.
 
-- **`__init__.py`** — Defines `Alert` and `_validate_and_build()`. The `Alert` dataclass is the single canonical representation used by every downstream module. `_opt_str()` prevents Python `None` values from becoming the literal string `"None"` when ingesting JSON null fields.
+- **`__init__.py`** — Defines `Alert` and `_validate_and_build()`. The `Alert` dataclass is the single canonical representation used by every downstream stage. `_opt_str()` prevents Python `None` values from becoming the literal string `"None"` when ingesting JSON null fields. Asset tags are lowercased at parse time so `"DC"` and `"server"` both match scoring logic.
 - **`csv_ingestor.py`** — Opens files with `utf-8-sig` encoding to transparently handle UTF-8 BOM headers produced by Excel and many SIEMs.
-- **`json_ingestor.py`** — Expects a JSON array at the root. Single-object files return empty.
+- **`json_ingestor.py`** — Expects a JSON array at the root. Single-object roots return empty.
 
-**Design decision:** Both ingestors call the same `_validate_and_build()` function. There is no field normalization logic duplicated between them. All validation (severity, category, port parsing, tag lowercasing) happens in one place.
+**Design decision:** Both ingestors delegate to the same `_validate_and_build()`. Severity normalization, category validation, port parsing, and tag lowercasing happen once, in one place.
+
+---
 
 ### `sources/`
 
-Provider abstraction for alert acquisition. Decouples the pipeline from its input mechanism.
+Provider abstraction that decouples alert acquisition from the rest of the pipeline.
 
-- **`base.py`** — `AlertSource` ABC defines `fetch() -> list` and `source_name() -> str`.
-- **`file_source.py`** — Wraps the existing file ingestors. The only source that returns `Alert` objects directly (ingestors already call `_validate_and_build`).
-- **`splunk_source.py`** — Queries Splunk's REST jobs API using `exec_mode=oneshot`. Handles field mapping from Splunk event fields to the `Alert` schema. Credentials read from environment variables.
-- **`elastic_source.py`** — Queries an Elasticsearch index with a `@timestamp` date-range filter. Supports API key auth (preferred) and username/password fallback. The `elasticsearch` package is imported inside `fetch()` so the tool works without it installed unless `--source elastic` is used.
+- **`base.py`** — `AlertSource` ABC with `fetch() -> list` and `source_name() -> str`.
+- **`file_source.py`** — Wraps the file ingestors. Returns `Alert` objects directly (ingestors already call `_validate_and_build`).
+- **`splunk_source.py`** — Queries Splunk's REST jobs API with `exec_mode=oneshot`. Maps Splunk event fields to the `Alert` schema. Credentials from environment variables. Returns `[]` on any connection, auth, or parse failure.
+- **`elastic_source.py`** — Queries an Elasticsearch index with a `@timestamp` date-range filter. Prefers API key auth; falls back to username/password. The `elasticsearch` package is imported inside `fetch()` so the tool works without it installed unless `--source elastic` is used.
 
-**Design decision:** The provider interface means adding a new source (e.g. AWS Security Hub, Microsoft Sentinel) requires one new class implementing `fetch()` and a field mapping function. The scoring, enrichment, and reporting stages are untouched.
+**Design decision:** Adding a new source (AWS Security Hub, Microsoft Sentinel) requires one class implementing `fetch()` and a field mapping function. Enrichment, scoring, and reporting are untouched.
+
+---
 
 ### `enrichment/`
 
 Enriches `Alert` objects in-place with external threat intelligence.
 
-- **`virustotal.py`** — Queries the VT IP reputation endpoint. Returns `vt_malicious_ratio` (float 0–1), `vt_country`, `vt_as_owner`. Rate-limited at module level using `_last_call_time`.
-- **`shodan_lookup.py`** — Queries Shodan for open ports, known CVEs, org, and a pre-computed exposure score. The `shodan` library is imported inside `lookup_ip()` to allow graceful failure when not installed.
-- **`cache.py`** — File-based JSON cache keyed by `{module}_{safe_ip}` in `output/.cache/`. TTL-checked at read time. Concurrent write safety is not guaranteed (single-process assumption).
+- **`virustotal.py`** — Queries the VT IP reputation endpoint. Returns `vt_malicious_ratio` (float 0–1), `vt_country`, `vt_as_owner`. Rate-limited via module-level `_last_call_time` (single-process assumption).
+- **`shodan_lookup.py`** — Queries Shodan for open ports, known CVEs, org. The `shodan` library is imported inside `lookup_ip()` for graceful failure if not installed.
+- **`cache.py`** — File-based JSON cache keyed by `{module}_{safe_ip}` in `output/.cache/`. TTL-checked at read time. Files written with `chmod 600`.
 
-**Design decision:** Private/reserved/non-routable IPs (including RFC1918, loopback, and link-local addresses) are short-circuited before any API call in `_enrich_alert()`. Internal IPs are enriched by correlation and asset data, not by external threat feeds.
+**Design decision:** Private/reserved/non-routable IPs — RFC1918, loopback (127.x), link-local (169.254.x) — are short-circuited before any API call. They return no useful enrichment data and would waste rate-limited API quota. They are still fully included in incident correlation.
+
+---
 
 ### `correlation/`
 
 Two responsibilities: MITRE ATT&CK tagging and time-windowed incident correlation.
 
-- **`tagger.py`** — Maps `alert.category` and `alert.rule_id` prefix to a MITRE tactic and technique. Rule ID prefix takes priority over category when both match. Mappings live in `mitre_mappings.yaml` adjacent to the module, loaded once at import time.
-- **`mitre_mappings.yaml`** — Human-editable lookup table. 7 category mappings, 16 rule ID prefix mappings.
-- **`engine.py`** — Groups alerts by `source_ip` within a configurable time window (default 15 minutes). Computes a combined incident score using `peak * 0.6 + mean * 0.3 + min(count/10, 1.0) * 0.1`. Detects kill chains when the tactic chain spans two or more distinct MITRE tactic stages.
+- **`tagger.py`** — Maps `alert.category` and `alert.rule_id` prefix to an ATT&CK tactic and technique. Rule ID prefix takes priority when both match. Mappings loaded once at import time from `mitre_mappings.yaml`.
+- **`mitre_mappings.yaml`** — Human-editable lookup table. 7 category entries, 16 rule ID prefix entries. Extend without code changes.
+- **`engine.py`** — Groups alerts by `source_ip` within a configurable time window (default 15 minutes). Gap between consecutive same-IP alerts exceeding the window closes the current incident and starts a new one. Combined incident score: `peak * 0.6 + mean * 0.3 + min(count/10, 1.0) * 0.1`. Kill chain fires when tactic chain spans ≥ 2 distinct ATT&CK stages.
 
-**Design decision:** Private-IP alerts are included in correlation. RFC1918 source IPs frequently represent the most significant lateral movement paths and should not be excluded from incident grouping just because external enrichment was skipped.
+**Design decision:** Private-IP alerts are included in correlation. Internal lateral movement — compromised host pivoting through RFC1918 space — is among the most significant patterns to detect and must not be excluded because Shodan/VT returned nothing.
+
+---
 
 ### `scoring/`
 
 Computes a normalized priority score for each `Alert`.
 
-- **`scorer.py`** — Implements the 6-factor weighted scoring model. See `docs/scoring_model.md` for full formula documentation.
+- **`scorer.py`** — 6-factor weighted model. When enrichment factors are `None`, missing weights are redistributed across available factors so the model remains calibrated. Confidence degrades when enrichment is absent.
+- **`constants.py`** — Single source of truth for `PRIORITY_LABELS` thresholds, imported by both `scorer.py` and `correlation/engine.py` to prevent divergence.
 
-**Design decision:** When enrichment is unavailable (dry-run or API failure), missing factors are excluded from the weighted sum and the remaining weights are renormalized to 1.0. A high-severity alert on a critical asset scores correctly even without VT/Shodan data — and the result is explicitly marked as low confidence so the analyst knows enrichment was missing. This is more honest than treating missing data as benign.
+See [scoring_model.md](scoring_model.md) for the full formula, port weight table, and tuning guide.
+
+**Design decision:** Missing enrichment is renormalized, not zeroed. A high-severity alert on a domain controller scores correctly even without VT/Shodan data — and the analyst sees `confidence: low`, not a suppressed score that hides a real threat.
+
+---
 
 ### `store/`
 
 Persists all run data to SQLite.
 
-- **`alert_db.py`** — Two tables: `run_metadata` (one row per pipeline run) and `triage_results` (one row per alert per run). Batch inserts via `executemany` inside a single transaction. Foreign key enforcement enabled. Indexes on `(run_id, score DESC)` and `(source_ip, timestamp)` for baseline queries. `get_prior_sightings()` counts prior appearances of a host+rule pair within a configurable lookback window.
+- **`alert_db.py`** — Two tables: `run_metadata` (one row per run) and `triage_results` (one row per alert per run). Batch inserts via `executemany` in a single transaction. Foreign key enforcement on. Indexes on `(run_id, score DESC)` and `(source_ip, timestamp)`. `get_prior_sightings()` counts prior appearances of a source IP within a configurable lookback window.
 
-**Design decision:** The DB is opened before the scoring loop (not after) so `get_prior_sightings()` can query historical data during scoring. The run record is not created until after scores are ready to store — read queries during scoring do not create orphaned run records.
+**Design decision:** The DB connection is opened before the scoring loop so `get_prior_sightings()` can query historical data during scoring. The run record (`start_run()`) is not created until after all scores are ready to store — scoring queries do not create orphaned run records.
+
+---
 
 ### `reporting/`
 
 Generates a self-contained HTML analyst report.
 
-- **`html_report.py`** — All HTML, CSS, and JavaScript are inlined. No CDN dependencies. The report works fully offline. Sections: correlated incidents panel, score distribution histogram, priority summary cards, sortable/filterable alert table with MITRE tactic column, prior sightings column, and expandable score breakdowns. All user-supplied strings pass through `_esc()` before HTML insertion.
+- **`html_report.py`** — All HTML, CSS, and JavaScript inlined. No CDN dependencies. Works offline. Sections: correlated incidents panel (with kill chain badges and tactic chains), score distribution histogram, priority summary cards, sortable/filterable/searchable alert table with MITRE tactic column, prior sightings column, and expandable per-alert score breakdowns. All user-supplied data passes through `_esc()` before insertion.
 
 ---
 
-## Data Flow: Alert Lifecycle
+## Configuration Reference
 
-```
-Raw input row (dict)
-  ↓ _validate_and_build()
-Alert(alert_id, timestamp, source_ip, ..., enrichment_source="pending")
-  ↓ _enrich_alert() [skipped if private/reserved/non-routable IP]
-Alert(..., vt_malicious_ratio=0.72, shodan_open_ports=[3389,445], shodan_vulns=["CVE-2021-34527"], enrichment_source="live")
-  ↓ tag_alert()
-Alert(..., mitre_tactic="LATERAL_MOVEMENT", mitre_technique="T1021.001")
-  ↓ score_alert(prior_sightings_count=2)
-TriageResult(score=0.84, priority_label="INVESTIGATE_NOW", confidence="high", enrichment_completeness=1.0)
-  ↓ correlate_alerts()
-CorrelatedIncident(host="185.x.x.x", alert_count=3, kill_chain_detected=True, combined_score=0.81)
-  ↓ store_alerts_batch()
-SQLite row in triage_results
-  ↓ render_report()
-Self-contained HTML file
-```
+All tunables live in `config/config.yaml`. No hardcoded values in library code.
 
----
-
-## Configuration
-
-All tunables live in `config/config.yaml`. No hardcoded values in library code. Key sections:
-
-| Section | Purpose |
-|---|---|
-| `pipeline` | Log level, output directory, DB path |
-| `pipeline.dry_run` | Skip all API calls when true; also settable via `--dry-run` CLI flag |
-| `enrichment` | VT/Shodan enable flags, API key env vars, cache TTL |
-| `sources` | Splunk and Elastic connection parameters |
-| `scoring.weights` | Per-factor weights (must sum to 1.0) |
-| `scoring.severity_map` | Severity string → float mapping |
-| `scoring.confidence_thresholds` | Score thresholds for high/medium confidence |
-| `scoring.baseline_lookback_days` | Prior sightings query window |
-| `correlation` | Time window in minutes, minimum alert count |
-| `correlation.min_alerts_per_incident` | Minimum alerts for an incident to be returned (default: 1) |
-| `reporting` | Top-N highlight count |
+| Section | Key | Purpose |
+|---|---|---|
+| `pipeline` | `log_level` | Logging verbosity |
+| `pipeline` | `dry_run` | Skip all API calls (also settable via `--dry-run`) |
+| `pipeline` | `output_dir` | Default output directory |
+| `pipeline` | `db_path` | SQLite database path |
+| `enrichment.virustotal` | `enabled`, `api_key_env`, `rate_limit_per_min` | VT control |
+| `enrichment.shodan` | `enabled`, `api_key_env` | Shodan control |
+| `enrichment.cache` | `ttl_seconds`, `cache_dir` | Cache behaviour |
+| `sources.splunk` | `host`, `port`, `username_env`, `password_env`, `search` | Splunk connection |
+| `sources.elastic` | `host`, `api_key_env`, `index`, `lookback_minutes` | Elastic connection |
+| `scoring.weights` | Six factor keys | Must sum to 1.0 |
+| `scoring.severity_map` | `critical`→`low` | Severity-to-float mapping |
+| `scoring.confidence_thresholds` | `high_confidence` | Score threshold for high confidence |
+| `scoring.baseline_lookback_days` | integer | Prior sightings history window |
+| `scoring.recency` | `half_life_hours`, `floor` | Recency decay parameters |
+| `correlation` | `window_minutes` | Time window for incident grouping |
+| `correlation` | `min_alerts_per_incident` | Minimum alerts per returned incident |
+| `reporting` | `highlight_top_n` | Number of priority cards shown |
 
 ---
 
 ## Testing
 
-The test suite is organized by module and uses only the Python standard library plus `pytest`. No network calls, no test databases, no mocking of external services except where testing error handling.
+The test suite uses only the Python standard library plus `pytest`. No network calls, no real databases, no live API calls.
 
+```mermaid
+graph LR
+    A[test_ingestion.py\n56 tests] --> B["CSV/JSON parsing\nNull handling · BOM\nTag normalization"]
+    C[test_enrichment.py\n15 tests] --> D["VT/Shodan mocking\nCache hit/miss\nRate limiter"]
+    E[test_scoring.py\n37 tests] --> F["Precision assertions\nRenorm invariants\nShodan exposure model"]
+    G[test_correlation.py\n12 tests] --> H["Window grouping\nKill chain detection\nEdge cases"]
+    I[test_report.py\n15 tests] --> J["HTML structure\nSelf-containment\nMITRE badges · Histogram"]
 ```
-tests/
-  test_ingestion.py    ← CSV/JSON parsing, null handling, BOM, tag normalization
-  test_enrichment.py   ← VT/Shodan mocking, cache hit/miss, rate limiter
-  test_scoring.py      ← Precision assertions, renorm invariants, Shodan model
-  test_correlation.py  ← Window grouping, kill chain detection, edge cases
-  test_report.py       ← HTML structure, self-containment, new sections
-```
-
-Run all tests:
 
 ```bash
-pytest tests/ -v
-```
-
-Run with coverage:
-
-```bash
-pytest tests/ -v --cov=. --cov-report=term-missing
+pytest tests/ -v                                    # run all 111 tests
+pytest tests/ -v --cov=. --cov-report=term-missing  # with coverage
 ```
 
 ---
 
-## Operational Assumptions and Limitations
+## Operational Notes
 
-**Single-process:** The rate limiter, cache, and DB connection are designed for single-process execution. Running two instances simultaneously against the same cache directory or database may produce torn writes or duplicate run records.
+**Single-process design.** The rate limiter, cache, and DB connection are not concurrent-safe. Running two instances against the same cache directory or database may produce torn writes or duplicate run records.
 
-**Enrichment is best-effort:** API failures, timeouts, and private IPs all result in `enrichment_source` values that are not `"live"`. The scoring model handles this explicitly via renormalization and confidence degradation rather than silently treating missing data as clean data.
+**Enrichment is best-effort.** API failures, timeouts, and private IPs set `enrichment_source` to values other than `"live"`. The scoring model handles each case explicitly — renormalization for missing data, confidence degradation for partial data.
 
-**Recency is runtime-calculated:** Alert scores drift over time because recency uses the current wall clock. An alert scored at T=0 and re-scored at T+12h will produce a lower recency component. The DB stores the score at the time of the run, not a live recalculation.
+**Recency is runtime-calculated.** Scores drift over time because recency uses the wall clock at scoring time. The database stores the score at the moment of the run.
 
-**Prior sightings requires history:** On the first run against a fresh database, all alerts will have zero prior sightings. The baseline factor becomes meaningful after several runs have accumulated.
+**Prior sightings requires accumulated history.** On the first run against a fresh database, all prior sightings counts are zero. The factor becomes meaningful after several runs.
 
-**Splunk/Elastic adapters are connection-tested, not production-hardened:** The adapters handle auth failures and connection errors gracefully but do not implement pagination, streaming, or checkpoint-based deduplication. For high-volume environments, implement a checkpoint file or use Splunk's `latest` parameter.
+**Splunk and Elastic adapters are integration-tested, not production-hardened.** They handle auth failures and connection errors gracefully but do not implement pagination or checkpoint-based deduplication. For high-volume environments, add a checkpoint file or use Splunk's `latest` search parameter.

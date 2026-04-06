@@ -6,24 +6,34 @@ This document describes the 6-factor weighted scoring model used to assign prior
 
 ## Overview
 
-Each alert receives a score in `[0.0, 1.0]`. The score is computed as a weighted sum of six normalized factors. The weights are configurable in `config/config.yaml` and must sum to 1.0.
+Each alert receives a score in `[0.0, 1.0]`. The score is a weighted sum of six normalized factors. Weights are configurable in `config/config.yaml` and must sum to 1.0.
 
-Default weights:
+```mermaid
+flowchart LR
+    S[Severity\n0.25] --> W[Weighted Sum]
+    V[VT Malicious Ratio\n0.20] --> W
+    SH[Shodan Exposure\n0.15] --> W
+    A[Asset Criticality\n0.15] --> W
+    R[Recency\n0.15] --> W
+    P[Prior Sightings\n0.10] --> W
+    W --> SC[Score 0.0–1.0]
+    SC --> L[Priority Label]
+```
 
 | Factor | Weight | Source |
 |---|---|---|
 | Severity | 0.25 | Alert metadata |
 | VT malicious ratio | 0.20 | VirusTotal API |
 | Shodan exposure | 0.15 | Shodan API |
-| Asset criticality | 0.15 | Alert asset tags |
-| Recency | 0.15 | Alert timestamp |
+| Asset criticality | 0.15 | Alert `asset_tags` field |
+| Recency | 0.15 | Alert `timestamp` field |
 | Prior sightings | 0.10 | SQLite run history |
 
 ---
 
 ## Factor Definitions
 
-### 1. Severity (`severity`)
+### 1. Severity
 
 Maps the alert severity string to a float using `config.scoring.severity_map`:
 
@@ -34,19 +44,19 @@ Maps the alert severity string to a float using `config.scoring.severity_map`:
 | `medium` | 0.45 |
 | `low` | 0.20 |
 
-Unrecognized severity strings default to `low` at ingestion time.
+Unrecognized values default to `low` at ingestion time.
 
-### 2. VT Malicious Ratio (`vt_malicious_ratio`)
+### 2. VT Malicious Ratio
 
-The ratio of VirusTotal engines that flagged the source IP as malicious:
+The fraction of VirusTotal engines that flagged the source IP:
 
 ```
 vt_score = malicious_count / total_engine_count
 ```
 
-Range: `[0.0, 1.0]`. A ratio of 0.40 means 40% of VT engines returned a positive signal.
+Range: `[0.0, 1.0]`. A ratio of 0.40 means 40% of VT engines returned a positive detection.
 
-### 3. Shodan Exposure (`shodan_exposure`)
+### 3. Shodan Exposure
 
 Computed from open ports and known CVEs using a service-weighted model:
 
@@ -60,36 +70,33 @@ Port weight table:
 
 | Risk tier | Ports | Weight each |
 |---|---|---|
-| High risk | 3389 (RDP), 445 (SMB), 5900 (VNC), 1433 (MSSQL), 9200 (Elasticsearch), 27017 (MongoDB), 6379 (Redis), 4444 (Metasploit default), 8080 (alt-HTTP), 2375 (Docker daemon) | 0.15 |
-| Medium risk | 22 (SSH), 21 (FTP), 23 (Telnet), 25 (SMTP), 3306 (MySQL), 5432 (PostgreSQL), 5984 (CouchDB), 11211 (Memcached), 2181 (Zookeeper) | 0.07 |
-| Other | All other ports | 0.02 |
+| High | 3389 (RDP), 445 (SMB), 5900 (VNC), 1433 (MSSQL), 9200 (Elasticsearch), 27017 (MongoDB), 6379 (Redis), 4444 (Metasploit), 8080 (alt-HTTP), 2375 (Docker) | 0.15 |
+| Medium | 22 (SSH), 21 (FTP), 23 (Telnet), 25 (SMTP), 3306 (MySQL), 5432 (PostgreSQL), 5984 (CouchDB), 11211 (Memcached), 2181 (Zookeeper) | 0.07 |
+| Other | All remaining ports | 0.02 |
 
-**Why this model over raw counts:** Port 3389 exposed to the internet is not equivalent to port 80. Counting them equally would make a web server with many open ports appear more exposed than an RDP-accessible Windows host with one. The weighted model reflects real-world attack surface.
+**Why weighted over raw counts:** Port 3389 exposed to the internet is not equivalent to port 80. A web server with many open ports should not outscore an RDP-accessible Windows host with one. The weighted model reflects real-world attack surface prioritization.
 
-When `shodan_open_ports` is populated (from a live or cached Shodan lookup), the weighted model is used. When only the pre-computed `shodan_exposure_score` float is available (e.g. from a legacy import), it is used directly.
+When `shodan_open_ports` is populated from a live or cached Shodan lookup, the weighted model is used. When only a pre-computed `shodan_exposure_score` float is available (e.g. from a third-party import), it is used directly.
 
-### 4. Asset Criticality (`asset_criticality`)
+### 4. Asset Criticality
 
-Derived from the `asset_tags` field of the alert:
+Derived from `asset_tags`:
 
 | Tags contain | Score |
 |---|---|
 | `dc` or `server` | 1.00 |
 | `cloud` | 0.50 |
-| `workstation` | 0.20 |
-| anything else / none | 0.20 |
+| `workstation` or none | 0.20 |
 
-Tags are normalized to lowercase at ingestion time so `"DC"`, `"Server"`, and `"server"` all match correctly.
+Tags are normalized to lowercase at ingestion time.
 
-### 5. Recency (`recency`)
+### 5. Recency
 
-Uses an exponential half-life decay with a 6-hour half-life and a floor of 0.10:
+Exponential half-life decay with a 6-hour half-life and a floor of 0.10 (configurable):
 
 ```
-recency_score = max(exp(-ln(2) * age_hours / 6.0), 0.10)
+recency_score = max(exp(-ln(2) * age_hours / half_life), floor)
 ```
-
-Example values:
 
 | Alert age | Score |
 |---|---|
@@ -97,20 +104,17 @@ Example values:
 | 1 hour | ~0.89 |
 | 6 hours | ~0.50 |
 | 12 hours | ~0.25 |
-| 24 hours | ~0.10 (floor) |
-| 7 days | 0.10 (floor) |
+| 24 hours+ | 0.10 (floor) |
 
-**Why exponential over step function:** A 59-minute-old alert and a 61-minute-old alert should not receive materially different scores just because they straddle an arbitrary tier boundary. The continuous model eliminates cliff edges and is more defensible as a scoring decision.
+**Why exponential over step function:** A 59-minute-old alert and a 61-minute-old alert should not receive materially different scores because they straddle a tier boundary. The continuous model eliminates cliff edges.
 
-### 6. Prior Sightings (`prior_sightings`)
+### 6. Prior Sightings
 
-Counts how many times the same `source_ip` has fired any alert within the lookback window. Per-rule filtering via `rule_id` is a planned future enhancement. Lookback window is configurable, default 7 days:
+Counts how many times the same `source_ip` has fired any alert in the last N days (configurable, default 7). Per-rule filtering is a planned future enhancement.
 
 ```
-sightings_score = min(1 - (0.7 ^ prior_sightings_count), 1.0)
+sightings_score = min(1 - (0.7 ^ count), 1.0)
 ```
-
-Example values:
 
 | Prior sightings | Score |
 |---|---|
@@ -121,38 +125,50 @@ Example values:
 | 5 | 0.83 |
 | 10 | 0.97 |
 
-**Why this matters:** A one-off alert from a never-before-seen host is different from the same alert firing for the fifth time this week from the same IP. Repeated sightings are a strong signal that a threat is persistent and not just noise.
-
-On the first pipeline run against a fresh database, all prior sightings counts are zero. The factor becomes meaningful after several runs have accumulated history.
+**Why this matters:** A one-off alert from a never-before-seen host is different from the same alert firing repeatedly from the same IP. Repeated sightings signal persistence, not noise.
 
 ---
 
 ## Renormalization for Missing Enrichment
 
-When VT or Shodan data is unavailable (dry-run mode, API failure, or private IP), the missing factors are excluded from the weighted sum and the remaining weights are scaled up proportionally:
+When VT or Shodan data is unavailable (dry-run, API failure, or private IP), missing factors are **excluded from the weighted sum** and the remaining weights scale up proportionally:
 
 ```
 available_weight = sum(weights[k] for k in factors where value is not None)
 effective_weight[k] = weights[k] / available_weight
-score[k] = factor_value[k] * effective_weight[k]
-final_score = sum(score[k] for all k)
+final_score = sum(factor_value[k] * effective_weight[k] for available k)
 ```
 
-**Example — high-severity server alert in dry-run (VT + Shodan both None, first run so prior_sightings count=0):**
+**Example — critical-severity domain controller alert, dry-run, first run (prior_sightings count = 0):**
 
-Available factors: severity=0.25, asset_criticality=0.15, recency=0.15, prior_sightings=0.10 (score=0.0 on first run when count=0; weight still included since factor is available)
-Sum of available weights = 0.65
-Renormalized: severity=0.385, asset_criticality=0.231, recency=0.231, prior_sightings=0.154
+| Factor | Available? | Raw weight | Renormalized weight |
+|---|---|---|---|
+| Severity (critical = 1.0) | ✓ | 0.25 | 0.385 |
+| VT malicious ratio | ✗ | 0.20 | — |
+| Shodan exposure | ✗ | 0.15 | — |
+| Asset criticality (dc = 1.0) | ✓ | 0.15 | 0.231 |
+| Recency (30 min ago ≈ 0.98) | ✓ | 0.15 | 0.231 |
+| Prior sightings (count=0 → 0.0) | ✓ | 0.10 | 0.154 |
+| **Available weight** | | **0.65** | |
 
-A `high`-severity `server` alert from 30 minutes ago produces a score of ~0.87 in dry-run. The same alert with full enrichment and no VT/Shodan detections would score ~0.55. This is intentional: the model does not treat absence of threat intelligence as absence of threat.
+`final_score ≈ 0.385 * 1.0 + 0.231 * 1.0 + 0.231 * 0.98 + 0.154 * 0.0 ≈ 0.84`
 
-**The result is explicitly marked as `confidence: low`** so the analyst knows that VT and Shodan data were not available and the score is operating on structural factors only.
+The result is marked `confidence: low` — the analyst sees the score is based on structural factors only, not external threat intelligence.
 
 ---
 
 ## Priority Labels
 
-The final score maps to a priority label using inclusive lower-bound thresholds:
+```mermaid
+flowchart LR
+    SC[Score] --> N{"≥ 0.80?"}
+    N -->|Yes| IN[INVESTIGATE_NOW]
+    N -->|No| IS{"≥ 0.55?"}
+    IS -->|Yes| ISN[INVESTIGATE_SOON]
+    IS -->|No| M{"≥ 0.30?"}
+    M -->|Yes| MO[MONITOR]
+    M -->|No| LP[LOW_PRIORITY]
+```
 
 | Score | Label |
 |---|---|
@@ -165,45 +181,48 @@ The final score maps to a priority label using inclusive lower-bound thresholds:
 
 ## Confidence Levels
 
-Confidence reflects enrichment completeness, not score magnitude:
+Confidence reflects enrichment completeness, not score magnitude.
 
 | Enrichment state | Confidence |
 |---|---|
-| Both VT and Shodan present | `high` (if score ≥ 0.80) or `medium` |
-| One of VT or Shodan missing | `medium` (always) |
-| Both VT and Shodan missing | `low` (always) |
+| Both VT and Shodan present, score ≥ 0.80 | `high` |
+| Both VT and Shodan present, score < 0.80 | `medium` |
+| One of VT or Shodan missing | `medium` |
+| Both VT and Shodan missing | `low` |
 
-Confidence is independent of the priority label. A `INVESTIGATE_NOW` alert with `confidence: low` means the engine has flagged it as high-priority based on structural factors (severity + asset criticality) but enrichment was not available to confirm the threat.
+A `INVESTIGATE_NOW` with `confidence: low` means the engine flagged it based on severity and asset criticality — external intelligence was unavailable to confirm or deny the threat.
 
 ---
 
 ## Known Limitations
 
-**Enrichment is source-IP-centric.** VT and Shodan are queried against `source_ip`. For some alert categories (phishing, data exfiltration), the more relevant entity is the destination IP, domain, URL, or file hash. Future versions may add entity-type-aware enrichment routing.
+**Source-IP-centric enrichment.** VT and Shodan are queried against `source_ip`. For phishing and data exfiltration alerts, the more relevant entity is often the destination IP, domain, URL, or file hash.
 
-**Asset criticality is tag-based.** Tags are assigned at SIEM export time and may not reflect reality. A misconfigured SIEM export that omits asset tags will cause all alerts to score as `endpoint`-level assets.
+**Tag-based asset criticality.** Tags are assigned at SIEM export time. A misconfigured export that omits asset tags will score all alerts as endpoint-level assets.
 
-**Prior sightings does not deduplicate.** If the same SIEM fires 50 identical alerts in one run, all 50 are stored and will inflate the prior sightings count for future runs. Deduplication at ingestion time is a planned enhancement.
+**No deduplication in prior sightings.** If the same SIEM fires 50 identical alerts in one run, all 50 are stored and will inflate future sighting counts.
 
-**The model is additive.** Interaction effects between factors are not modeled. A high-severity alert with high VT and high Shodan exposure does not receive a multiplicative bonus beyond the weighted sum. Real threat correlation is non-linear.
+**Additive model.** Interaction effects between factors are not modeled. Real threat correlation is non-linear.
 
-**Weights are not learned.** The default weights reflect reasonable operational judgment but have not been validated against historical incident data. Organizations should tune weights based on their own environment and false positive rates.
+**Weights are not learned.** Default weights reflect operational judgment. Organizations should tune based on environment and observed false positive rates.
 
 ---
 
 ## Tuning Guide
 
-To adjust the model for your environment, edit `config/config.yaml`:
+All parameters in `config/config.yaml`. Changes take effect on the next run — no code changes required.
 
 ```yaml
 scoring:
   weights:
-    severity: 0.25           # Increase if your SIEM severity is reliable
+    severity: 0.25           # Increase if SIEM severity signal is reliable
     vt_malicious_ratio: 0.20 # Decrease if VT produces many false positives
     shodan_exposure: 0.15    # Increase for internet-facing infrastructure
     asset_criticality: 0.15  # Increase if asset tagging is comprehensive
-    recency: 0.15            # Decrease if batch processing old events
-    prior_sightings: 0.10    # Increase after history accumulates
+    recency: 0.15            # Decrease when batch-processing historical events
+    prior_sightings: 0.10    # Increase after several runs have accumulated
+  baseline_lookback_days: 7
+  recency:
+    half_life_hours: 6.0     # Halving interval for recency decay
+    floor: 0.10              # Minimum recency score for old alerts
 ```
-
-Weights must sum to exactly 1.0. Confidence thresholds and severity mapping are also configurable without code changes.
