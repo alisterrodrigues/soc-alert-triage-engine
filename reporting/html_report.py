@@ -11,12 +11,12 @@ from scoring.constants import PRIORITY_LABELS
 
 logger = logging.getLogger(__name__)
 
-# Priority label → (border color, background color)
+# Priority label → (border color, background color) — dark-theme tinted panels
 PRIORITY_COLORS = {
-    "INVESTIGATE_NOW":  ("#c0392b", "#fadbd8"),
-    "INVESTIGATE_SOON": ("#e67e22", "#fdebd0"),
-    "MONITOR":          ("#2980b9", "#d6eaf8"),
-    "LOW_PRIORITY":     ("#7f8c8d", "#f2f3f4"),
+    "INVESTIGATE_NOW":  ("#e55c4a", "#3d1c18"),
+    "INVESTIGATE_SOON": ("#e8943a", "#3a2414"),
+    "MONITOR":          ("#4aaddb", "#142840"),
+    "LOW_PRIORITY":     ("#4e6880", "#1c2e40"),
 }
 
 # MITRE ATT&CK tactic → badge color
@@ -132,90 +132,105 @@ def _build_html(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SOC Alert Triage Report \u2014 {now}</title>
 <style>
+  :root {{
+    --bg:          #0d1b2a;
+    --panel:       #162232;
+    --panel-alt:   #1a2b3d;
+    --panel-hover: #1f3347;
+    --border:      #243d55;
+    --border-soft: #1e3249;
+    --text:        #c8d8e8;
+    --text-muted:  #7a96b0;
+    --text-dim:    #4e6880;
+    --accent:      #3498db;
+    --shadow:      0 2px 8px rgba(0,0,0,0.35);
+  }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f6fa; color: #2c3e50; font-size: 14px; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }}
   .page {{ max-width: 1400px; margin: 0 auto; padding: 24px; }}
-  .header {{ background: #1a252f; color: white; padding: 24px 32px; border-radius: 8px; margin-bottom: 24px; }}
+  .header {{ background: #0a1520; color: white; padding: 24px 32px; border-radius: 8px; margin-bottom: 24px; border: 1px solid var(--border); }}
   .header h1 {{ font-size: 22px; font-weight: 600; margin-bottom: 8px; }}
-  .header .meta {{ font-size: 12px; color: #95a5a6; display: flex; gap: 24px; flex-wrap: wrap; }}
+  .header .meta {{ font-size: 12px; color: var(--text-muted); display: flex; gap: 24px; flex-wrap: wrap; }}
   .summary {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }}
-  .summary-card {{ background: white; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .summary-card {{ background: var(--panel); border-radius: 8px; padding: 20px; text-align: center; box-shadow: var(--shadow); border: 1px solid var(--border); }}
   .summary-card .count {{ font-size: 32px; font-weight: 700; line-height: 1; }}
-  .summary-card .label {{ font-size: 11px; color: #7f8c8d; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
-  .inv-now   .count {{ color: #c0392b; }}
-  .inv-soon  .count {{ color: #e67e22; }}
-  .monitor   .count {{ color: #2980b9; }}
-  .low-pri   .count {{ color: #7f8c8d; }}
-  .section-title {{ font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #2c3e50; border-left: 3px solid #3498db; padding-left: 10px; }}
+  .summary-card .label {{ font-size: 11px; color: var(--text-muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }}
+  .inv-now   .count {{ color: #e55c4a; }}
+  .inv-soon  .count {{ color: #e8943a; }}
+  .monitor   .count {{ color: #4aaddb; }}
+  .low-pri   .count {{ color: var(--text-dim); }}
+  .section-title {{ font-size: 15px; font-weight: 600; margin-bottom: 16px; color: var(--text); border-left: 3px solid var(--accent); padding-left: 10px; }}
   .cards {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 16px; margin-bottom: 32px; }}
-  .card {{ border-radius: 8px; padding: 18px 20px; border-left: 4px solid; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .card {{ border-radius: 8px; padding: 18px 20px; border-left: 4px solid; box-shadow: var(--shadow); background: var(--panel); }}
   .card-header {{ display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }}
-  .card-name {{ font-weight: 600; font-size: 13px; flex: 1; margin-right: 12px; }}
+  .card-name {{ font-weight: 600; font-size: 13px; flex: 1; margin-right: 12px; color: var(--text); }}
   .card-score {{ font-size: 20px; font-weight: 700; white-space: nowrap; }}
-  .card-label {{ font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.7; margin-bottom: 6px; }}
-  .card-summary {{ font-size: 12px; color: #555; line-height: 1.5; margin-bottom: 10px; }}
-  .card-meta {{ display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: #666; }}
-  .tag {{ background: rgba(0,0,0,0.06); border-radius: 3px; padding: 2px 6px; }}
-  .table-container {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); overflow: hidden; margin-bottom: 24px; }}
-  .table-controls {{ padding: 16px 20px; border-bottom: 1px solid #ecf0f1; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
-  .filter-btn {{ padding: 5px 12px; border: 1px solid #ddd; border-radius: 4px; background: white; cursor: pointer; font-size: 12px; transition: all 0.15s; }}
-  .filter-btn.active, .filter-btn:hover {{ background: #3498db; color: white; border-color: #3498db; }}
-  .search-box {{ padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; width: 220px; }}
-  .search-box:focus {{ outline: none; border-color: #3498db; box-shadow: 0 0 0 2px rgba(52,152,219,0.15); }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th {{ background: #f8f9fa; text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: #7f8c8d; border-bottom: 1px solid #ecf0f1; cursor: pointer; user-select: none; white-space: nowrap; }}
-  th:hover {{ background: #eef2f7; }}
-  th .sort-icon {{ margin-left: 4px; opacity: 0.4; }}
-  td {{ padding: 10px 14px; border-bottom: 1px solid #f0f0f0; vertical-align: top; font-size: 12px; }}
+  .card-label {{ font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.6; margin-bottom: 6px; color: var(--text-muted); }}
+  .card-summary {{ font-size: 12px; color: var(--text-muted); line-height: 1.5; margin-bottom: 10px; }}
+  .card-meta {{ display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-muted); }}
+  .tag {{ background: rgba(255,255,255,0.06); border-radius: 3px; padding: 2px 6px; border: 1px solid var(--border-soft); }}
+  .table-container {{ background: var(--panel); border-radius: 8px; box-shadow: var(--shadow); border: 1px solid var(--border); margin-bottom: 24px; overflow: hidden; }}
+  .table-scroll {{ overflow-x: auto; }}
+  .table-controls {{ padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
+  .filter-btn {{ padding: 5px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel-alt); color: var(--text-muted); cursor: pointer; font-size: 12px; transition: all 0.15s; white-space: nowrap; }}
+  .filter-btn.active, .filter-btn:hover {{ background: var(--accent); color: white; border-color: var(--accent); }}
+  .search-box {{ padding: 5px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; width: 220px; background: var(--panel-alt); color: var(--text); }}
+  .search-box::placeholder {{ color: var(--text-dim); }}
+  .search-box:focus {{ outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(52,152,219,0.2); }}
+  table {{ width: 100%; border-collapse: collapse; min-width: 900px; }}
+  th {{ background: var(--panel-alt); text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-muted); border-bottom: 1px solid var(--border); cursor: pointer; user-select: none; white-space: nowrap; }}
+  th:hover {{ background: var(--panel-hover); color: var(--text); }}
+  th .sort-icon {{ margin-left: 4px; opacity: 0.3; }}
+  td {{ padding: 10px 14px; border-bottom: 1px solid var(--border-soft); vertical-align: top; font-size: 12px; color: var(--text); }}
   tr:last-child td {{ border-bottom: none; }}
-  tr:hover td {{ background: #fafbfc; }}
+  tr:hover td {{ background: var(--panel-hover); }}
   tr.hidden {{ display: none; }}
   .score-cell {{ white-space: nowrap; }}
   .score-bar-wrap {{ display: flex; align-items: center; gap: 6px; }}
-  .score-bar {{ height: 8px; border-radius: 4px; background: #ecf0f1; width: 80px; overflow: hidden; }}
+  .score-bar {{ height: 8px; border-radius: 4px; background: var(--border); width: 80px; overflow: hidden; }}
   .score-fill {{ height: 100%; border-radius: 4px; }}
   .score-val {{ font-weight: 600; width: 32px; text-align: right; }}
   .badge {{ display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }}
-  .badge-INVESTIGATE_NOW  {{ background: #fadbd8; color: #922b21; }}
-  .badge-INVESTIGATE_SOON {{ background: #fdebd0; color: #a04000; }}
-  .badge-MONITOR          {{ background: #d6eaf8; color: #1a5276; }}
-  .badge-LOW_PRIORITY     {{ background: #f2f3f4; color: #566573; }}
-  .tactic-badge {{ display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; color: white; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; margin: 1px; }}
-  .expand-btn {{ cursor: pointer; color: #3498db; font-size: 11px; text-decoration: underline; background: none; border: none; padding: 0; }}
+  .badge-INVESTIGATE_NOW  {{ background: rgba(192,57,43,0.25); color: #e55c4a; border: 1px solid rgba(192,57,43,0.4); }}
+  .badge-INVESTIGATE_SOON {{ background: rgba(230,126,34,0.20); color: #e8943a; border: 1px solid rgba(230,126,34,0.35); }}
+  .badge-MONITOR          {{ background: rgba(41,128,185,0.20); color: #4aaddb; border: 1px solid rgba(41,128,185,0.35); }}
+  .badge-LOW_PRIORITY     {{ background: rgba(127,140,141,0.15); color: var(--text-dim); border: 1px solid var(--border); }}
+  .tactic-badge {{ display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px; color: white; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; margin: 1px; opacity: 0.9; }}
+  .expand-btn {{ cursor: pointer; color: var(--accent); font-size: 11px; text-decoration: underline; background: none; border: none; padding: 0; white-space: nowrap; }}
+  .expand-btn:hover {{ color: #5dade2; }}
   .breakdown-row {{ display: none; }}
   .breakdown-row.open {{ display: table-row; }}
-  .breakdown-inner {{ padding: 12px 14px; background: #f8f9fa; }}
+  .breakdown-inner {{ padding: 12px 14px; background: var(--panel-alt); border-top: 1px solid var(--border); }}
   .breakdown-bars {{ display: flex; flex-direction: column; gap: 6px; }}
   .breakdown-item {{ display: flex; align-items: center; gap: 8px; font-size: 11px; }}
-  .breakdown-name {{ width: 150px; color: #555; }}
-  .breakdown-bar {{ flex: 1; height: 8px; background: #ecf0f1; border-radius: 4px; overflow: hidden; }}
-  .breakdown-bar-fill {{ height: 100%; border-radius: 4px; background: #3498db; }}
-  .breakdown-val {{ width: 36px; text-align: right; color: #333; font-weight: 600; }}
-  .conf-high   {{ color: #27ae60; font-weight: 600; }}
-  .conf-medium {{ color: #e67e22; font-weight: 600; }}
-  .conf-low    {{ color: #e74c3c; font-weight: 600; }}
-  .sighting-first {{ color: #27ae60; font-weight: 600; font-size: 11px; }}
-  .sighting-low   {{ color: #e67e22; font-weight: 600; font-size: 11px; }}
-  .sighting-high  {{ color: #c0392b; font-weight: 600; font-size: 11px; }}
-  .footer {{ font-size: 11px; color: #95a5a6; text-align: center; margin-top: 24px; padding: 16px; }}
-  .footer code {{ background: #ecf0f1; padding: 1px 5px; border-radius: 3px; font-family: monospace; }}
+  .breakdown-name {{ width: 150px; color: var(--text-muted); }}
+  .breakdown-bar {{ flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }}
+  .breakdown-bar-fill {{ height: 100%; border-radius: 4px; background: var(--accent); }}
+  .breakdown-val {{ width: 36px; text-align: right; color: var(--text); font-weight: 600; }}
+  .conf-high   {{ color: #2ecc71; font-weight: 600; }}
+  .conf-medium {{ color: #e8943a; font-weight: 600; }}
+  .conf-low    {{ color: #e55c4a; font-weight: 600; }}
+  .sighting-first {{ color: #2ecc71; font-weight: 600; font-size: 11px; }}
+  .sighting-low   {{ color: #e8943a; font-weight: 600; font-size: 11px; }}
+  .sighting-high  {{ color: #e55c4a; font-weight: 600; font-size: 11px; }}
+  .footer {{ font-size: 11px; color: var(--text-dim); text-align: center; margin-top: 24px; padding: 16px; }}
+  .footer code {{ background: var(--panel-alt); padding: 1px 5px; border-radius: 3px; font-family: monospace; color: var(--text-muted); border: 1px solid var(--border); }}
   /* Incidents panel */
   .incidents-panel {{ margin-bottom: 28px; }}
   .incidents-panel-stats {{ display: flex; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }}
-  .istat {{ background: white; border-radius: 8px; padding: 14px 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); min-width: 130px; }}
-  .istat-num {{ font-size: 26px; font-weight: 700; color: #2c3e50; line-height: 1; }}
-  .istat-lbl {{ font-size: 11px; color: #7f8c8d; text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px; }}
-  .istat.kill {{ }}
-  .istat.kill .istat-num {{ color: #c0392b; }}
+  .istat {{ background: var(--panel); border-radius: 8px; padding: 14px 20px; box-shadow: var(--shadow); min-width: 130px; border: 1px solid var(--border); }}
+  .istat-num {{ font-size: 26px; font-weight: 700; color: var(--text); line-height: 1; }}
+  .istat-lbl {{ font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.4px; margin-top: 4px; }}
+  .istat.kill .istat-num {{ color: #e55c4a; }}
   .incident-cards-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }}
-  .incident-card {{ border-radius: 8px; padding: 16px 18px; border-left: 4px solid; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+  .incident-card {{ border-radius: 8px; padding: 16px 18px; border-left: 4px solid; box-shadow: var(--shadow); background: var(--panel); }}
   .incident-card-score {{ font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 6px; }}
-  .incident-card-host {{ font-size: 14px; font-weight: 600; color: #2c3e50; margin-bottom: 4px; font-family: monospace; }}
-  .incident-card-span {{ font-size: 11px; color: #7f8c8d; margin-bottom: 8px; }}
+  .incident-card-host {{ font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; font-family: monospace; }}
+  .incident-card-span {{ font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }}
   .incident-card-tactics {{ display: flex; flex-wrap: wrap; gap: 2px; align-items: center; }}
   .kill-chain-badge {{ display: inline-block; background: #c0392b; color: white; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 4px; }}
   /* Histogram */
-  .score-histogram-wrap {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 18px 20px; margin-bottom: 16px; }}
+  .score-histogram-wrap {{ background: var(--panel); border-radius: 8px; box-shadow: var(--shadow); padding: 18px 20px; margin-bottom: 16px; border: 1px solid var(--border); }}
 </style>
 </head>
 <body>
@@ -503,7 +518,7 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
         </td>
       </tr>""")
 
-    return header + "\n".join(rows) + "\n    </tbody>\n  </table>"
+    return '<div class="table-scroll">' + header + "\n".join(rows) + "\n    </tbody>\n  </table></div>"
 
 
 def _build_incidents_panel(incidents: list) -> str:
@@ -627,12 +642,12 @@ def _build_score_histogram(results: list) -> str:
         label_y = margin_top + max_bar_h + label_h
         bars.append(
             f'<text x="{x + bar_w // 2}" y="{label_y}" '
-            f'text-anchor="middle" font-size="8" fill="#999">{low:.1f}</text>'
+            f'text-anchor="middle" font-size="8" fill="#7a96b0">{low:.1f}</text>'
         )
         if count > 0:
             bars.append(
                 f'<text x="{x + bar_w // 2}" y="{y - 2}" '
-                f'text-anchor="middle" font-size="9" fill="#555">{count}</text>'
+                f'text-anchor="middle" font-size="9" fill="#c8d8e8">{count}</text>'
             )
 
     svg = (
@@ -644,7 +659,7 @@ def _build_score_histogram(results: list) -> str:
 
     return (
         f'<div class="score-histogram-wrap">'
-        f'<div style="font-size:12px;font-weight:600;color:#7f8c8d;margin-bottom:10px;'
+        f'<div style="font-size:12px;font-weight:600;color:#7a96b0;margin-bottom:10px;'
         f'text-transform:uppercase;letter-spacing:0.4px;">Score Distribution</div>'
         f"{svg}"
         f"</div>"
