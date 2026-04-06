@@ -57,11 +57,12 @@ class SplunkSource(AlertSource):
         self._username = os.environ.get(username_env, "")
         self._password = os.environ.get(password_env, "")
 
-    def fetch(self) -> list[dict]:
-        """Run the configured SPL query and return normalized raw dicts.
+    def fetch(self) -> list:
+        """Run the configured SPL query and return raw field dicts.
 
-        Uses Splunk's oneshot search endpoint so no async job polling is needed.
-        Returns empty list on any connection, auth, or parse failure.
+        Returns a list of dicts that must be normalized via _validate_and_build()
+        before use. Uses Splunk's oneshot search endpoint so no async job polling
+        is needed. Returns empty list on any connection, auth, or parse failure.
         Logs error with enough detail to diagnose (URL, status code) without
         logging credential values.
         """

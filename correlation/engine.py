@@ -1,12 +1,9 @@
 """Alert correlation engine: groups scored alerts into time-windowed incidents and detects kill chains."""
-import logging
 import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
-
-logger = logging.getLogger(__name__)
 
 MITRE_TACTIC_STAGES = {
     "RECONNAISSANCE", "INITIAL_ACCESS", "EXECUTION", "PERSISTENCE",
@@ -15,12 +12,7 @@ MITRE_TACTIC_STAGES = {
     "COMMAND_AND_CONTROL", "EXFILTRATION", "IMPACT",
 }
 
-_PRIORITY_LABELS = [
-    ("INVESTIGATE_NOW",  0.80),
-    ("INVESTIGATE_SOON", 0.55),
-    ("MONITOR",          0.30),
-    ("LOW_PRIORITY",     0.00),
-]
+from scoring.constants import PRIORITY_LABELS
 
 
 @dataclass
@@ -47,32 +39,29 @@ def correlate_alerts(
     window_minutes: int = 15,
     min_alerts_per_incident: int = 1,
 ) -> list:
-    """Group alerts by source_ip within a rolling time window and detect multi-stage chains.
+    """Group alerts by source_ip within a rolling time window and detect multi-stage attack chains.
 
-    Algorithm:
-    1. Build a dict mapping alert_id → TriageResult for O(1) score lookup.
-    2. Sort alerts by (source_ip, timestamp) so temporal grouping is O(n).
-    3. For each source_ip group: slide a window of `window_minutes` width.
-       Any alert whose timestamp falls within `window_minutes` of the first alert
-       in the current group joins that incident. When a gap > window_minutes is
-       found, close the current incident and start a new one.
-    4. Combined score formula:
-       combined_score = peak_score * 0.6 + mean_score * 0.3 + min(alert_count / 10, 1.0) * 0.1
-       Capped at 1.0.
-    5. tactic_chain: extract mitre_tactic from each alert (field added by Spec C).
-       If mitre_tactic is None or empty, skip. Deduplicate preserving order.
-    6. kill_chain_detected: True if tactic_chain contains >= 2 of these tactic stages:
-       RECONNAISSANCE, INITIAL_ACCESS, EXECUTION, PERSISTENCE, PRIVILEGE_ESCALATION,
-       DEFENSE_EVASION, CREDENTIAL_ACCESS, DISCOVERY, LATERAL_MOVEMENT, COLLECTION,
-       COMMAND_AND_CONTROL, EXFILTRATION, IMPACT.
-    7. summary: "{alert_count} alerts from {host} over {duration_minutes}min — {top tactic or category}."
+    Alerts sharing a source IP with consecutive timestamps within `window_minutes` of each
+    other are merged into a single CorrelatedIncident. When a gap larger than the window
+    is found between consecutive same-IP alerts, a new incident is started.
+
+    The combined incident score is weighted toward the peak individual alert score:
+        combined = peak * 0.6 + mean * 0.3 + min(count / 10, 1.0) * 0.1
+
+    Kill chain detection fires when the incident's tactic chain spans two or more distinct
+    MITRE ATT&CK tactic stages. Alerts with no tactic tag are included in grouping but
+    do not contribute to the tactic chain.
+
+    Private/RFC1918 source IPs are fully included — internal lateral movement paths are
+    among the most significant patterns to detect.
 
     Args:
-        alerts: List of Alert instances (with mitre_tactic populated if Spec C is applied).
+        alerts: List of Alert instances. mitre_tactic is read if present.
         results: List of TriageResult instances parallel to alerts.
-        window_minutes: Maximum gap between consecutive alerts to group them.
-        min_alerts_per_incident: Incidents with fewer alerts than this are still returned
-            (set to 1 so single high-severity alerts are included as incidents).
+        window_minutes: Maximum gap in minutes between consecutive same-IP alerts
+            before a new incident is started. Default: 15.
+        min_alerts_per_incident: Minimum alert count for an incident to be returned.
+            Currently applied as a post-filter. Default: 1 (all incidents returned).
 
     Returns:
         List of CorrelatedIncident instances sorted by combined_score descending.
@@ -112,6 +101,9 @@ def correlate_alerts(
                 current_group = [alert]
 
     incidents.append(_build_incident(current_group, result_map))
+
+    if min_alerts_per_incident > 1:
+        incidents = [i for i in incidents if i.alert_count >= min_alerts_per_incident]
 
     incidents.sort(key=lambda i: i.combined_score, reverse=True)
     return incidents
@@ -184,7 +176,7 @@ def _parse_ts(ts: str) -> Optional[datetime]:
 
 def _score_to_label(score: float) -> str:
     """Map a combined score to a priority label using the standard thresholds."""
-    for label, threshold in _PRIORITY_LABELS:
+    for label, threshold in PRIORITY_LABELS:
         if score >= threshold:
             return label
     return "LOW_PRIORITY"

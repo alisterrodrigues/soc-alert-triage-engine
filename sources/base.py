@@ -6,13 +6,15 @@ class AlertSource(ABC):
     """Provider interface for fetching raw alerts from any source."""
 
     @abstractmethod
-    def fetch(self) -> list[dict]:
-        """Fetch raw alert dicts from the source.
+    def fetch(self) -> list:
+        """Fetch alerts from the source.
 
         Returns:
-            List of raw dict rows. Each dict must be normalizable by
-            ingestion._validate_and_build(). Keys should match the Alert schema.
-            Empty list on failure — never raises.
+            For file-based sources: a list of Alert dataclass instances.
+            For API-based sources (Splunk, Elastic): a list of raw field dicts
+            that must be normalized via _validate_and_build() before use.
+            The concrete type differs by implementation — callers must handle both.
+            Returns an empty list on any failure; never raises.
         """
 
     @abstractmethod

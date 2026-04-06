@@ -10,8 +10,6 @@ from pathlib import Path
 import yaml
 
 from enrichment.cache import EnrichmentCache
-from ingestion.csv_ingestor import ingest_csv
-from ingestion.json_ingestor import ingest_json
 from scoring.scorer import score_alert, TriageResult
 from store.alert_db import AlertDB
 
@@ -245,18 +243,21 @@ def _export_results(results: list, alerts: list, fmt: str, output_dir: str) -> N
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    if not rows:
+        return
+
     if fmt in ("csv", "both"):
         csv_path = out / f"triage_results_{ts}.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv_mod.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
-        print(f"  Exported CSV: {csv_path}")
+        logging.getLogger("cli.main").info(f"Exported CSV: {csv_path}")
 
     if fmt in ("json", "both"):
         json_path = out / f"triage_results_{ts}.json"
         json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
-        print(f"  Exported JSON: {json_path}")
+        logging.getLogger("cli.main").info(f"Exported JSON: {json_path}")
 
 
 class _NoopCache:
@@ -337,6 +338,7 @@ def main() -> None:
 
     config = load_config(args.config)
     setup_logging(config.get("pipeline", {}).get("log_level", "INFO"))
+    args.dry_run = args.dry_run or config.get("pipeline", {}).get("dry_run", False)
     logger = logging.getLogger("cli.main")
 
     db_path = config.get("pipeline", {}).get("db_path", "output/triage.db")
@@ -356,14 +358,23 @@ def main() -> None:
         from ingestion import _validate_and_build
         alerts = [a for row in raw_rows for a in [_validate_and_build(row, "elastic")] if a]
     else:
-        # file source — existing behavior
+        if not args.input:
+            print("[ERROR] --input is required when --source file", file=sys.stderr)
+            sys.exit(1)
         fmt = args.format
         if fmt == "auto":
             fmt = detect_format(args.input)
-        alerts = ingest_csv(args.input) if fmt == "csv" else ingest_json(args.input)
+        from sources.file_source import FileSource
+        source = FileSource(filepath=args.input, fmt=fmt)
+        alerts = source.fetch()
 
     if not alerts:
-        logger.error("No alerts ingested — check input file and format")
+        source_hint = {
+            "file": f"check --input path '{args.input}' and file format",
+            "splunk": "check Splunk connection, credentials, and search query",
+            "elastic": "check Elasticsearch connection, API key, and index name",
+        }.get(args.source, "check input source and configuration")
+        logger.error(f"No alerts ingested — {source_hint}")
         sys.exit(1)
 
     logger.info(f"Ingested {len(alerts)} alerts")
@@ -394,7 +405,11 @@ def main() -> None:
     for alert in alerts:
         _enrich_alert(alert, vt_key, shodan_key, config, cache, args.dry_run)
 
-    logger.info(f"Enrichment complete — {len(alerts)}/{len(alerts)} alerts processed")
+    source_counts = {}
+    for a in alerts:
+        source_counts[a.enrichment_source] = source_counts.get(a.enrichment_source, 0) + 1
+    breakdown = ", ".join(f"{k}: {v}" for k, v in sorted(source_counts.items()))
+    logger.info(f"Enrichment complete — {breakdown}")
 
     # Tag with MITRE ATT&CK
     from correlation.tagger import tag_alert
@@ -411,6 +426,9 @@ def main() -> None:
     severity_map = scoring_cfg.get("severity_map", {})
     confidence_thresholds = scoring_cfg.get("confidence_thresholds", {})
     lookback_days = scoring_cfg.get("baseline_lookback_days", 7)
+    recency_cfg = scoring_cfg.get("recency", {})
+    recency_half_life = recency_cfg.get("half_life_hours", 6.0)
+    recency_floor = recency_cfg.get("floor", 0.10)
 
     results: list[TriageResult] = []
     for alert in alerts:
@@ -422,6 +440,8 @@ def main() -> None:
         result = score_alert(
             alert, weights, severity_map, confidence_thresholds,
             prior_sightings_count=sightings,
+            recency_half_life=recency_half_life,
+            recency_floor=recency_floor,
         )
         results.append(result)
 
@@ -430,14 +450,14 @@ def main() -> None:
     # Correlate
     correlation_cfg = config.get("correlation", {})
     window_min = correlation_cfg.get("window_minutes", 15)
+    min_alerts = correlation_cfg.get("min_alerts_per_incident", 1)
     from correlation.engine import correlate_alerts
-    incidents = correlate_alerts(alerts, results, window_minutes=window_min)
+    incidents = correlate_alerts(alerts, results, window_minutes=window_min, min_alerts_per_incident=min_alerts)
     logger.info(f"Correlation complete — {len(incidents)} incidents identified from {len(alerts)} alerts")
 
     # Store
     run_id = db.start_run()
-    for alert, result in zip(alerts, results):
-        db.store_alert(run_id, alert, triage_result=result)
+    db.store_alerts_batch(run_id, list(zip(alerts, results)))
     db.finish_run(run_id, len(alerts))
     db.close()
 

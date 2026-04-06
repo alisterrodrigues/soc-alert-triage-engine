@@ -72,23 +72,6 @@ class AlertDB:
         """Create database tables and indexes if they do not already exist."""
         self._conn.executescript(SCHEMA_SQL)
         self._conn.commit()
-        # Guard: add enrichment_completeness column to pre-existing databases
-        try:
-            self._conn.execute(
-                "ALTER TABLE triage_results ADD COLUMN enrichment_completeness REAL"
-            )
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass
-
-        # Guard: add prior_sightings_count column to pre-existing databases
-        try:
-            self._conn.execute(
-                "ALTER TABLE triage_results ADD COLUMN prior_sightings_count INTEGER"
-            )
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass
 
     def start_run(self, config_hash: str = "", scoring_weights: Optional[dict] = None) -> str:
         """Create a run_metadata record and return the new run_id (UUID).
@@ -194,10 +177,10 @@ class AlertDB:
             )
 
     def store_alert(self, run_id: str, alert, triage_result=None) -> None:
-        """Persist an alert (and optional triage result) to triage_results.
+        """Persist a single alert and its triage result to triage_results.
 
-        In Phase 1, triage_result is None — score/label/summary are stored as NULL.
-        In Phase 3+, triage_result will be a TriageResult dataclass.
+        Delegates to store_alerts_batch() with a single-element list.
+        triage_result may be None, in which case all scoring columns are stored as NULL.
 
         Args:
             run_id: UUID of the current triage run.
@@ -221,21 +204,26 @@ class AlertDB:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_prior_sightings(self, source_ip: str, rule_id: str, lookback_days: int = 7) -> int:
-        """Count how many times this source_ip + rule_id pair has appeared in the last N days.
+    def get_prior_sightings(self, source_ip: str, rule_id: Optional[str], lookback_days: int = 7) -> int:
+        """Count prior appearances of a source IP within the lookback window.
+
+        Queries completed triage runs for any alert from the given source IP
+        in the last N days. Used by the scoring layer to detect repeat offenders.
+        rule_id is accepted for API compatibility but is not currently used in
+        the query — per-rule filtering is a planned future enhancement.
 
         Args:
-            source_ip: Source IP address string.
-            rule_id: Rule identifier string (may be None — query uses NULL-safe comparison).
-            lookback_days: How many days of history to search.
+            source_ip: Source IP address string to look up.
+            rule_id: Reserved for future per-rule filtering. Pass None or alert.rule_id.
+            lookback_days: Number of days of history to search.
 
         Returns:
-            Integer count of prior alert rows matching this host/rule in the lookback window.
+            Integer count of prior alert rows from this source IP in the lookback window.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
         cursor = self._conn.execute(
-            "SELECT COUNT(*) FROM triage_results WHERE source_ip = ? AND rule_id IS ? AND timestamp >= ?",
-            (source_ip, rule_id, cutoff),
+            "SELECT COUNT(*) FROM triage_results WHERE source_ip = ? AND timestamp >= ?",
+            (source_ip, cutoff),
         )
         return cursor.fetchone()[0]
 

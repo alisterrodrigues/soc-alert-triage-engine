@@ -1,8 +1,6 @@
 """Tests for the correlation engine — no external calls, pure function testing."""
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from ingestion import Alert
 from scoring.scorer import TriageResult
 from correlation.engine import CorrelatedIncident, correlate_alerts

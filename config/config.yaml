@@ -29,9 +29,6 @@ scoring:
     recency: 0.15
     prior_sightings: 0.10
   baseline_lookback_days: 7
-  # Shodan exposure tuning
-  shodan_exposure:
-    half_life_hours: 6.0
   recency:
     half_life_hours: 6.0
     floor: 0.10
@@ -54,8 +51,6 @@ correlation:
   min_alerts_per_incident: 1
 
 reporting:
-  max_alerts_in_report: 200
-  include_raw_alert: true
   highlight_top_n: 5
 
 sources:
@@ -70,6 +65,8 @@ sources:
   elastic:
     host: https://localhost:9200
     api_key_env: ELASTIC_API_KEY
+    username_env: ELASTIC_USERNAME
+    password_env: ELASTIC_PASSWORD
     index: ".alerts-security.alerts-default"
     lookback_minutes: 60
     max_alerts: 500

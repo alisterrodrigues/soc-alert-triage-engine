@@ -24,7 +24,7 @@ class Alert:
     asset_tags: list[str] = field(default_factory=list)   # split from comma-separated string
     raw_payload: Optional[str] = None
     analyst_notes: Optional[str] = None
-    # Enrichment fields — populated in Phase 2
+    # Enrichment fields — set by the enrichment pipeline after ingestion
     vt_malicious_ratio: Optional[float] = None
     vt_country: Optional[str] = None
     vt_as_owner: Optional[str] = None
@@ -36,7 +36,7 @@ class Alert:
     # MITRE ATT&CK fields — populated by correlation/tagger.py
     mitre_tactic: Optional[str] = None          # e.g. "LATERAL_MOVEMENT"
     mitre_technique: Optional[str] = None        # e.g. "T1021.001"
-    mitre_technique_name: Optional[str] = None   # e.g. "Remote Desktop Protocol" | skipped_private
+    mitre_technique_name: Optional[str] = None   # e.g. "Remote Desktop Protocol"
 
 
 def _opt_str(val) -> Optional[str]:

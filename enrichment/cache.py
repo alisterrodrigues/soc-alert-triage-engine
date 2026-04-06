@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -34,8 +35,7 @@ class EnrichmentCache:
         Returns:
             Path object for the cache file.
         """
-        # Sanitize IP for filesystem safety (replace : and . with _)
-        safe_ip = ip.replace(".", "_").replace(":", "_")
+        safe_ip = ip.replace(".", "_").replace(":", "_").replace("/", "_")
         return self.cache_dir / f"{module}_{safe_ip}.json"
 
     def get(self, module: str, ip: str) -> Optional[dict]:
@@ -75,5 +75,9 @@ class EnrichmentCache:
         try:
             with open(path, "w") as f:
                 json.dump({"fetched_at": time.time(), "data": data}, f)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass  # Non-fatal on platforms where chmod is unavailable
         except Exception as e:
             logger.warning(f"Cache write error for {module}/{ip}: {e}")

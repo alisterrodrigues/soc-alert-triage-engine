@@ -104,7 +104,7 @@ Example values:
 
 ### 6. Prior Sightings (`prior_sightings`)
 
-Counts how many times the same `source_ip` + `rule_id` pair has fired in the last N days (configurable, default 7):
+Counts how many times the same `source_ip` has fired any alert within the lookback window. Per-rule filtering via `rule_id` is a planned future enhancement. Lookback window is configurable, default 7 days:
 
 ```
 sightings_score = min(1 - (0.7 ^ prior_sightings_count), 1.0)
@@ -138,10 +138,11 @@ score[k] = factor_value[k] * effective_weight[k]
 final_score = sum(score[k] for all k)
 ```
 
-**Example — high-severity server alert in dry-run (VT + Shodan both None):**
+**Example — high-severity server alert in dry-run (VT + Shodan both None, first run so prior_sightings count=0):**
 
-Original weights: severity=0.25, asset=0.15, recency=0.15 (sum of available = 0.55)
-Renormalized: severity=0.455, asset=0.273, recency=0.273
+Available factors: severity=0.25, asset_criticality=0.15, recency=0.15, prior_sightings=0.10 (score=0.0 on first run when count=0; weight still included since factor is available)
+Sum of available weights = 0.65
+Renormalized: severity=0.385, asset_criticality=0.231, recency=0.231, prior_sightings=0.154
 
 A `high`-severity `server` alert from 30 minutes ago produces a score of ~0.87 in dry-run. The same alert with full enrichment and no VT/Shodan detections would score ~0.55. This is intentional: the model does not treat absence of threat intelligence as absence of threat.
 

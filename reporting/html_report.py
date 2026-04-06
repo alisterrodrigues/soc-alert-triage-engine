@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from scoring.constants import PRIORITY_LABELS
+
 logger = logging.getLogger(__name__)
 
 # Priority label → (border color, background color)
@@ -33,6 +35,17 @@ TACTIC_COLORS = {
     "EXFILTRATION":         "#7b241c",
     "IMPACT":               "#641e16",
 }
+
+
+def _score_to_color(score: float) -> str:
+    """Return a hex color for the given score using standard priority thresholds."""
+    if score >= 0.80:
+        return "#c0392b"
+    elif score >= 0.55:
+        return "#e67e22"
+    elif score >= 0.30:
+        return "#2980b9"
+    return "#95a5a6"
 
 
 def render_report(
@@ -203,8 +216,6 @@ def _build_html(
   .kill-chain-badge {{ display: inline-block; background: #c0392b; color: white; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px; margin-left: 4px; }}
   /* Histogram */
   .score-histogram-wrap {{ background: white; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); padding: 18px 20px; margin-bottom: 16px; }}
-  /* Old incident table styles (kept for reference) */
-  .tactic-tag {{ display: inline-block; background: #eaf4fb; color: #1a5276; border-radius: 3px; padding: 1px 5px; font-size: 10px; margin: 1px; }}
 </style>
 </head>
 <body>
@@ -423,14 +434,7 @@ def _build_alert_table(results: list, alert_map: dict) -> str:
         category = _esc(alert.category.replace("_", " ")) if alert else "\u2014"
         alert_name = _esc(alert.alert_name if alert else r.alert_id)
 
-        if r.score >= 0.80:
-            bar_color = "#c0392b"
-        elif r.score >= 0.55:
-            bar_color = "#e67e22"
-        elif r.score >= 0.30:
-            bar_color = "#2980b9"
-        else:
-            bar_color = "#95a5a6"
+        bar_color = _score_to_color(r.score)
 
         score_pct = int(r.score * 100)
         conf_class = f"conf-{r.confidence}"
@@ -526,12 +530,7 @@ def _build_incidents_panel(incidents: list) -> str:
 
     cards = []
     for inc in top10:
-        score_color = (
-            "#c0392b" if inc.combined_score >= 0.80 else
-            "#e67e22" if inc.combined_score >= 0.55 else
-            "#2980b9" if inc.combined_score >= 0.30 else
-            "#95a5a6"
-        )
+        score_color = _score_to_color(inc.combined_score)
         border_color, bg_color = PRIORITY_COLORS.get(inc.priority_label, ("#95a5a6", "#f8f9fa"))
 
         try:
@@ -619,12 +618,7 @@ def _build_score_histogram(results: list) -> str:
         y = margin_top + max_bar_h - bar_h
 
         low = i * 0.1
-        bucket_color = (
-            "#c0392b" if low >= 0.80 else
-            "#e67e22" if low >= 0.55 else
-            "#2980b9" if low >= 0.30 else
-            "#bdc3c7"
-        )
+        bucket_color = _score_to_color(low) if low > 0 else "#bdc3c7"
 
         bars.append(
             f'<rect x="{x}" y="{y}" width="{bar_w}" height="{bar_h}" '
@@ -655,67 +649,6 @@ def _build_score_histogram(results: list) -> str:
         f"{svg}"
         f"</div>"
     )
-
-
-def _build_incidents_section(incidents: list) -> str:
-    """Build an HTML table section listing all correlated incidents.
-
-    Args:
-        incidents: List of CorrelatedIncident instances, sorted by combined_score desc.
-
-    Returns:
-        HTML string for the incidents table, or an empty-state message if none.
-    """
-    if not incidents:
-        return '<div style="color:#95a5a6;font-size:13px;padding:16px 0;">No correlated incidents detected.</div>'
-
-    rows = []
-    for inc in incidents:
-        score_color = (
-            "#c0392b" if inc.combined_score >= 0.80 else
-            "#e67e22" if inc.combined_score >= 0.55 else
-            "#2980b9" if inc.combined_score >= 0.30 else
-            "#95a5a6"
-        )
-        tactic_tags = " ".join(
-            f'<span class="tactic-tag">{_esc(t)}</span>' for t in inc.tactic_chain
-        ) or "<span style='color:#aaa'>—</span>"
-        kill_html = (
-            '<span style="color:#c0392b;font-weight:600;">&#10003; Yes</span>'
-            if inc.kill_chain_detected
-            else '<span style="color:#95a5a6;">No</span>'
-        )
-        short_id = inc.incident_id[:8]
-        rows.append(f"""
-      <tr>
-        <td><code style="font-size:11px;">{_esc(short_id)}</code></td>
-        <td>{_esc(inc.host)}</td>
-        <td style="text-align:center;">{inc.alert_count}</td>
-        <td style="font-weight:600;color:{score_color};">{inc.combined_score:.2f}</td>
-        <td><span class="badge badge-{inc.priority_label}">{_esc(inc.priority_label.replace("_", " "))}</span></td>
-        <td>{kill_html}</td>
-        <td>{tactic_tags}</td>
-        <td style="font-size:11px;color:#555;">{_esc(inc.summary)}</td>
-      </tr>""")
-
-    return f"""<div style="background:white;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.08);overflow:hidden;margin-bottom:32px;">
-  <table>
-    <thead>
-      <tr>
-        <th>Incident</th>
-        <th>Host</th>
-        <th>Alerts</th>
-        <th>Score</th>
-        <th>Priority</th>
-        <th>Kill Chain</th>
-        <th>Tactic Chain</th>
-        <th>Summary</th>
-      </tr>
-    </thead>
-    <tbody>{"".join(rows)}
-    </tbody>
-  </table>
-</div>"""
 
 
 def _esc(text) -> str:

@@ -80,11 +80,12 @@ class ElasticSource(AlertSource):
         self._username = os.environ.get(username_env, "")
         self._password = os.environ.get(password_env, "")
 
-    def fetch(self) -> list[dict]:
-        """Execute the Elasticsearch query and return normalized raw dicts.
+    def fetch(self) -> list:
+        """Execute the Elasticsearch query and return raw field dicts.
 
-        The elasticsearch package is imported here (not at module level) so this
-        tool works without it installed when not using the Elastic source.
+        Returns a list of dicts that must be normalized via _validate_and_build()
+        before use. The elasticsearch package is imported here (not at module level)
+        so this tool works without it installed when not using the Elastic source.
 
         Returns empty list on connection failure, auth failure, or if the
         elasticsearch package is not installed.

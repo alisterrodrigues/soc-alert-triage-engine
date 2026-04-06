@@ -93,7 +93,7 @@ Enriches `Alert` objects in-place with external threat intelligence.
 - **`shodan_lookup.py`** — Queries Shodan for open ports, known CVEs, org, and a pre-computed exposure score. The `shodan` library is imported inside `lookup_ip()` to allow graceful failure when not installed.
 - **`cache.py`** — File-based JSON cache keyed by `{module}_{safe_ip}` in `output/.cache/`. TTL-checked at read time. Concurrent write safety is not guaranteed (single-process assumption).
 
-**Design decision:** RFC1918 and loopback addresses are short-circuited before any API call in `_enrich_alert()`. Internal IPs are enriched by correlation and asset data, not by external threat feeds.
+**Design decision:** Private/reserved/non-routable IPs (including RFC1918, loopback, and link-local addresses) are short-circuited before any API call in `_enrich_alert()`. Internal IPs are enriched by correlation and asset data, not by external threat feeds.
 
 ### `correlation/`
 
@@ -135,7 +135,7 @@ Generates a self-contained HTML analyst report.
 Raw input row (dict)
   ↓ _validate_and_build()
 Alert(alert_id, timestamp, source_ip, ..., enrichment_source="pending")
-  ↓ _enrich_alert() [skipped if RFC1918]
+  ↓ _enrich_alert() [skipped if private/reserved/non-routable IP]
 Alert(..., vt_malicious_ratio=0.72, shodan_open_ports=[3389,445], shodan_vulns=["CVE-2021-34527"], enrichment_source="live")
   ↓ tag_alert()
 Alert(..., mitre_tactic="LATERAL_MOVEMENT", mitre_technique="T1021.001")
@@ -158,6 +158,7 @@ All tunables live in `config/config.yaml`. No hardcoded values in library code. 
 | Section | Purpose |
 |---|---|
 | `pipeline` | Log level, output directory, DB path |
+| `pipeline.dry_run` | Skip all API calls when true; also settable via `--dry-run` CLI flag |
 | `enrichment` | VT/Shodan enable flags, API key env vars, cache TTL |
 | `sources` | Splunk and Elastic connection parameters |
 | `scoring.weights` | Per-factor weights (must sum to 1.0) |
@@ -165,7 +166,8 @@ All tunables live in `config/config.yaml`. No hardcoded values in library code. 
 | `scoring.confidence_thresholds` | Score thresholds for high/medium confidence |
 | `scoring.baseline_lookback_days` | Prior sightings query window |
 | `correlation` | Time window in minutes, minimum alert count |
-| `reporting` | Max alerts, top-N highlight count |
+| `correlation.min_alerts_per_incident` | Minimum alerts for an incident to be returned (default: 1) |
+| `reporting` | Top-N highlight count |
 
 ---
 

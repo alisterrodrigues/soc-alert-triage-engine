@@ -24,10 +24,11 @@ class FileSource(AlertSource):
         self._fmt = fmt
 
     def fetch(self) -> list:
-        """Return list of Alert objects (not raw dicts).
+        """Return a list of Alert dataclass instances (not raw dicts).
 
         Delegates directly to ingest_csv or ingest_json, which handle
-        field validation and normalization internally.
+        field validation and normalization via _validate_and_build() internally.
+        Returns an empty list on any failure; never raises.
         """
         if self._fmt == "csv":
             return ingest_csv(self._filepath)

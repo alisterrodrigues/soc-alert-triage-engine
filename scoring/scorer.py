@@ -7,12 +7,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-PRIORITY_LABELS = [
-    ("INVESTIGATE_NOW",  0.80),
-    ("INVESTIGATE_SOON", 0.55),
-    ("MONITOR",          0.30),
-    ("LOW_PRIORITY",     0.00),
-]
+from scoring.constants import PRIORITY_LABELS
 
 # High/medium risk port sets used by _compute_shodan_exposure
 _HIGH_RISK_PORTS = {3389, 445, 5900, 1433, 9200, 27017, 6379, 4444, 8080, 2375}
@@ -39,6 +34,8 @@ def score_alert(
     severity_map: dict,
     confidence_thresholds: dict,
     prior_sightings_count: Optional[int] = None,
+    recency_half_life: float = 6.0,
+    recency_floor: float = 0.10,
 ) -> TriageResult:
     """Compute a weighted priority score for a single enriched Alert.
 
@@ -55,6 +52,8 @@ def score_alert(
         confidence_thresholds: Dict with keys high_confidence and medium_confidence (floats).
         prior_sightings_count: Count of matching alerts in the historical lookback window,
             or None when the DB is unavailable (factor excluded from renormalization).
+        recency_half_life: Half-life in hours for the recency exponential decay. Default: 6.0.
+        recency_floor: Minimum recency score so old-but-severe alerts remain visible. Default: 0.10.
 
     Returns:
         A TriageResult with score, priority_label, confidence, score_breakdown,
@@ -104,7 +103,7 @@ def score_alert(
 
     # ── Factor 5: Recency ────────────────────────────────────────────
     try:
-        recency_score = _compute_recency(alert.timestamp)
+        recency_score = _compute_recency(alert.timestamp, half_life=recency_half_life, floor=recency_floor)
     except Exception as e:
         logger.warning(f"Recency factor error for {alert.alert_id}: {e}")
         recency_score = 0.4
@@ -125,7 +124,7 @@ def score_alert(
     factor_values = {
         "severity":           severity_score,
         "vt_malicious_ratio": vt_score if alert.vt_malicious_ratio is not None else None,
-        "shodan_exposure":    shodan_score if (alert.shodan_exposure_score is not None or alert.shodan_open_ports) else None,
+        "shodan_exposure":    shodan_score if (alert.shodan_exposure_score is not None or alert.shodan_open_ports or alert.shodan_vulns) else None,
         "asset_criticality":  asset_score,
         "recency":            recency_score,
         "prior_sightings":    sightings_score,
@@ -179,18 +178,19 @@ def score_alert(
     )
 
 
-def _compute_recency(timestamp_str: str) -> float:
+def _compute_recency(timestamp_str: str, half_life: float = 6.0, floor: float = 0.10) -> float:
     """Convert an ISO 8601 timestamp to a recency score using exponential decay.
 
-    Uses a 6-hour half-life model: score halves every 6 hours from 1.0,
-    with a floor of 0.10 so old-but-severe alerts remain visible.
-    Falls back to 0.4 on parse failure.
+    Score halves every ``half_life`` hours from 1.0, with a minimum of ``floor``
+    so old-but-severe alerts remain visible. Falls back to 0.4 on parse failure.
 
     Args:
         timestamp_str: ISO 8601 datetime string, e.g. "2026-04-04T10:00:00Z".
+        half_life: Hours until the score halves. Configurable via scoring.recency.half_life_hours.
+        floor: Minimum score to prevent total decay. Configurable via scoring.recency.floor.
 
     Returns:
-        Float recency score in [0.10, 1.0].
+        Float recency score in [floor, 1.0].
     """
     try:
         ts = timestamp_str.replace("Z", "+00:00")
@@ -199,9 +199,8 @@ def _compute_recency(timestamp_str: str) -> float:
             alert_time = alert_time.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         age_hours = (now - alert_time).total_seconds() / 3600
-        half_life = 6.0
         decay = math.exp(-math.log(2) * age_hours / half_life)
-        return round(max(decay, 0.10), 4)
+        return round(max(decay, floor), 4)
     except Exception as e:
         logger.debug(f"Could not parse timestamp '{timestamp_str}': {e}")
         return 0.4
@@ -296,8 +295,8 @@ def _build_summary(
 ) -> str:
     """Generate a one-sentence analyst summary describing why the score was assigned.
 
-    The summary is deterministic and human-readable — no randomness, no LLM calls.
-    It states severity, category, asset context, and the most influential factor.
+    The summary is deterministic: it identifies the most influential scoring factor
+    and combines it with severity, category, asset context, and confidence level.
 
     Args:
         alert: Alert dataclass instance.

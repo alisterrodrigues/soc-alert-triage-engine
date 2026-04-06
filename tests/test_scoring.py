@@ -1,5 +1,4 @@
 """Tests for the scoring module — pure function testing, no external calls."""
-import math
 import pytest
 from datetime import datetime, timedelta, timezone
 

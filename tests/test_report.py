@@ -1,9 +1,8 @@
 """Tests for the HTML report generator."""
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-import pytest
 
 from correlation.engine import CorrelatedIncident
 from ingestion import Alert
@@ -30,6 +29,7 @@ def make_result(
             "shodan_exposure": 0.15,
             "asset_criticality": 0.08,
             "recency": 0.06,
+            "prior_sightings": 0.0,
         },
     )
 
@@ -38,7 +38,7 @@ def make_alert(alert_id: str = "TEST-001") -> Alert:
     """Return an Alert with realistic default values."""
     return Alert(
         alert_id=alert_id,
-        timestamp="2026-04-05T10:00:00Z",
+        timestamp=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
         source_ip="185.220.101.47",
         alert_name="Test malware beacon",
         severity="high",
@@ -171,7 +171,7 @@ def test_report_with_empty_results_does_not_crash():
         assert result == out
 
 
-# ── Spec F new tests ──────────────────────────────────────────────────────────
+# ── Incident and MITRE rendering tests ───────────────────────────────────────
 
 def make_incident(
     host: str = "10.0.0.1",
